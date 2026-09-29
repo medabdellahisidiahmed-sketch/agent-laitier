@@ -109,9 +109,12 @@ après, exactement dans ce format :
 "commande_structuree": {{...}} ou null}}"""
 
 
-def demander_a_gemini(message_client, stock):
+def demander_a_gemini(message_client, stock, max_essais=3):
     """Envoie le prompt à Gemini et renvoie le JSON déjà décodé
-    (dictionnaire Python), prêt à utiliser."""
+    (dictionnaire Python), prêt à utiliser.
+    Réessaie automatiquement en cas de surcharge temporaire (503)."""
+    import time
+
     prompt = PROMPT_SYSTEME.format(
         societe=NOM_SOCIETE,
         stock=json.dumps(stock, ensure_ascii=False),
@@ -131,9 +134,25 @@ def demander_a_gemini(message_client, stock):
         "generationConfig": {"temperature": 0.2},
     }
 
-    reponse = requests.post(url, headers=headers, json=payload, timeout=30)
-    reponse.raise_for_status()
-    data = reponse.json()
+    derniere_erreur = None
+    for essai in range(1, max_essais + 1):
+        try:
+            reponse = requests.post(url, headers=headers, json=payload, timeout=30)
+            if reponse.status_code == 503:
+                # Modèle surchargé : on attend un peu plus à chaque nouvel essai
+                print(f"Gemini surchargé (essai {essai}/{max_essais}), nouvelle tentative...")
+                time.sleep(3 * essai)
+                continue
+            reponse.raise_for_status()
+            data = reponse.json()
+            break
+        except requests.exceptions.RequestException as e:
+            derniere_erreur = e
+            time.sleep(3 * essai)
+    else:
+        # Tous les essais ont échoué : on renvoie une réponse de secours
+        # plutôt que de laisser planter tout le traitement du message
+        raise derniere_erreur or Exception("Gemini indisponible après plusieurs essais")
 
     # On extrait le texte, exactement comme le node "Code" faisait dans n8n
     texte = data["candidates"][0]["content"]["parts"][0]["text"]
