@@ -137,7 +137,7 @@ def demander_a_gemini(message_client, stock, max_essais=3):
     derniere_erreur = None
     for essai in range(1, max_essais + 1):
         try:
-            reponse = requests.post(url, headers=headers, json=payload, timeout=30)
+            reponse = requests.post(url, headers=headers, json=payload, timeout=60)
             if reponse.status_code == 503:
                 # Modèle surchargé : on attend un peu plus à chaque nouvel essai
                 print(f"Gemini surchargé (essai {essai}/{max_essais}), nouvelle tentative...")
