@@ -1,0 +1,14 @@
+{
+  "name": "Agent Laitier",
+  "short_name": "Laitier",
+  "description": "Commandez et posez vos questions au distributeur laitier",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F4F6FA",
+  "theme_color": "#1B4D8C",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
