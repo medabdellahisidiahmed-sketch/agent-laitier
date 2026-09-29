@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Agent Laitier</title>
+<link rel="manifest" href="/static/manifest.json">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<meta name="theme-color" content="#1B4D8C">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Laitier">
+<style>
+  :root {
+    --bleu: #1B4D8C;
+    --bleu-clair: #E8F0FB;
+    --fond: #F4F6FA;
+    --texte: #1E2430;
+    --gris: #8A93A3;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--fond);
+    color: var(--texte);
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+  header {
+    background: var(--bleu);
+    color: white;
+    padding: 14px 16px;
+    padding-top: calc(14px + env(safe-area-inset-top, 0px));
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  header img { width: 34px; height: 34px; border-radius: 50%; }
+  header .titres { line-height: 1.25; }
+  header .titres b { font-size: 15px; }
+  header .titres span { font-size: 12px; opacity: 0.85; display: block; }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .bulle {
+    max-width: 80%;
+    padding: 10px 13px;
+    border-radius: 14px;
+    font-size: 14.5px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+  }
+  .client {
+    align-self: flex-end;
+    background: var(--bleu);
+    color: white;
+    border-bottom-right-radius: 4px;
+  }
+  .agent {
+    align-self: flex-start;
+    background: white;
+    border: 1px solid #E3E7EF;
+    border-bottom-left-radius: 4px;
+  }
+  .agent.chargement { color: var(--gris); font-style: italic; }
+  form#saisie {
+    display: flex;
+    gap: 8px;
+    padding: 10px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    background: white;
+    border-top: 1px solid #E3E7EF;
+    flex-shrink: 0;
+  }
+  #texte {
+    flex: 1;
+    border: 1px solid #D7DCE5;
+    border-radius: 20px;
+    padding: 11px 16px;
+    font-size: 15px;
+    outline: none;
+  }
+  #texte:focus { border-color: var(--bleu); }
+  button#envoyer {
+    background: var(--bleu);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 42px;
+    height: 42px;
+    flex-shrink: 0;
+    font-size: 18px;
+    cursor: pointer;
+  }
+  button#envoyer:disabled { opacity: 0.5; }
+  #installer {
+    display: none;
+    margin: 8px 16px 0 16px;
+    background: var(--bleu-clair);
+    color: var(--bleu);
+    border: 1px solid #C9DBF3;
+    border-radius: 10px;
+    padding: 9px 12px;
+    font-size: 13px;
+    text-align: center;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <img src="/static/icon-192.png" alt="logo">
+    <div class="titres">
+      <b>Agent Laitier</b>
+      <span>Commandes &amp; questions produits</span>
+    </div>
+  </header>
+
+  <div id="installer">📲 Ajouter cette app à votre écran d'accueil</div>
+
+  <div id="messages"></div>
+
+  <form id="saisie">
+    <input id="texte" type="text" placeholder="Écrivez votre message..." autocomplete="off" required>
+    <button id="envoyer" type="submit">➤</button>
+  </form>
+</div>
+
+<script>
+  const zoneMessages = document.getElementById("messages");
+  const formulaire = document.getElementById("saisie");
+  const champTexte = document.getElementById("texte");
+  const boutonEnvoyer = document.getElementById("envoyer");
+
+  // Identifiant simple pour cette session de discussion (gardé en mémoire du navigateur)
+  let idClient = sessionStorage.getItem("id_client");
+  if (!idClient) {
+    idClient = "web-" + Math.random().toString(36).slice(2, 10);
+    sessionStorage.setItem("id_client", idClient);
+  }
+
+  function ajouterBulle(texte, auteur) {
+    const div = document.createElement("div");
+    div.className = "bulle " + auteur;
+    div.textContent = texte;
+    zoneMessages.appendChild(div);
+    zoneMessages.scrollTop = zoneMessages.scrollHeight;
+    return div;
+  }
+
+  // Message d'accueil
+  ajouterBulle("Bonjour ! Écrivez-moi votre commande ou votre question (produits, prix, livraison).", "agent");
+
+  formulaire.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const message = champTexte.value.trim();
+    if (!message) return;
+
+    ajouterBulle(message, "client");
+    champTexte.value = "";
+    boutonEnvoyer.disabled = true;
+    const bulleAttente = ajouterBulle("…", "agent chargement");
+
+    try {
+      const reponse = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id_client: idClient, message: message })
+      });
+      const data = await reponse.json();
+      bulleAttente.remove();
+      ajouterBulle(data.reponse || "Désolé, une erreur est survenue.", "agent");
+    } catch (err) {
+      bulleAttente.remove();
+      ajouterBulle("Connexion impossible. Réessayez dans un instant.", "agent");
+    } finally {
+      boutonEnvoyer.disabled = false;
+      champTexte.focus();
+    }
+  });
+
+  // --- Installation PWA (icône sur l'écran d'accueil) ---
+  let evenementInstall = null;
+  const boutonInstaller = document.getElementById("installer");
+
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    evenementInstall = e;
+    boutonInstaller.style.display = "block";
+  });
+
+  boutonInstaller.addEventListener("click", async () => {
+    if (!evenementInstall) return;
+    evenementInstall.prompt();
+    await evenementInstall.userChoice;
+    evenementInstall = null;
+    boutonInstaller.style.display = "none";
+  });
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/static/sw.js").catch(() => {});
+  }
+</script>
+</body>
+</html>
