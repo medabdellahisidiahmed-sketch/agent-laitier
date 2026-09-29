@@ -120,14 +120,18 @@ def demander_a_gemini(message_client, stock):
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        f"{GEMINI_MODEL}:generateContent"
     )
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json",
+    }
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2},
     }
 
-    reponse = requests.post(url, json=payload, timeout=30)
+    reponse = requests.post(url, headers=headers, json=payload, timeout=30)
     reponse.raise_for_status()
     data = reponse.json()
 
