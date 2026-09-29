@@ -1,0 +1,20 @@
+[
+  {
+    "produit": "Lait UHT 1L",
+    "stock_disponible": 150,
+    "prix_unitaire_mru": 350,
+    "unite": "carton"
+  },
+  {
+    "produit": "Yaourt nature",
+    "stock_disponible": 80,
+    "prix_unitaire_mru": 180,
+    "unite": "pack de 6"
+  },
+  {
+    "produit": "Fromage fondu",
+    "stock_disponible": 40,
+    "prix_unitaire_mru": 500,
+    "unite": "boîte"
+  }
+]
