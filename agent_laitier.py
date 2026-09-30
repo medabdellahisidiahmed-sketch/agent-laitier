@@ -33,7 +33,7 @@ WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")            # Jeton d'accès Me
 PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")  # ID du numéro WhatsApp Business
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "laitier2026")  # Mot de passe de vérification (vous le choisissez)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # Numéro WhatsApp du responsable qui doit recevoir les alertes
 # (réclamations, demandes de crédit). Format international sans "+".
