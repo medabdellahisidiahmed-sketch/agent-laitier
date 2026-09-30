@@ -32,8 +32,8 @@ from flask import Flask, request, jsonify
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")            # Jeton d'accès Meta
 PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")  # ID du numéro WhatsApp Business
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "laitier2026")  # Mot de passe de vérification (vous le choisissez)
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 # Numéro WhatsApp du responsable qui doit recevoir les alertes
 # (réclamations, demandes de crédit). Format international sans "+".
@@ -69,7 +69,7 @@ def ajouter_ligne(fichier, donnees):
 
 
 # ============================================================
-# 3. APPEL À L'IA GEMINI
+# 3. APPEL À L'IA (Groq — rapide et stable, alternative à Gemini)
 # ============================================================
 PROMPT_SYSTEME = """Tu es l'assistant commercial WhatsApp de {societe}, distributeur
 de produits laitiers en Mauritanie. Tu réponds aux boutiques et clients qui
@@ -109,10 +109,10 @@ après, exactement dans ce format :
 "commande_structuree": {{...}} ou null}}"""
 
 
-def demander_a_gemini(message_client, stock, max_essais=3):
-    """Envoie le prompt à Gemini et renvoie le JSON déjà décodé
-    (dictionnaire Python), prêt à utiliser.
-    Réessaie automatiquement en cas de surcharge temporaire (503)."""
+def demander_a_ia(message_client, stock, max_essais=3):
+    """Envoie le prompt à Groq (API compatible OpenAI) et renvoie le JSON
+    déjà décodé (dictionnaire Python), prêt à utiliser.
+    Réessaie automatiquement en cas d'indisponibilité temporaire."""
     import time
 
     prompt = PROMPT_SYSTEME.format(
@@ -121,26 +121,25 @@ def demander_a_gemini(message_client, stock, max_essais=3):
         message=message_client,
     )
 
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent"
-    )
+    url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
-        "x-goog-api-key": GEMINI_API_KEY,
+        "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2},
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
     }
 
     derniere_erreur = None
+    data = None
     for essai in range(1, max_essais + 1):
         try:
             reponse = requests.post(url, headers=headers, json=payload, timeout=60)
-            if reponse.status_code == 503:
-                # Modèle surchargé : on attend un peu plus à chaque nouvel essai
-                print(f"Gemini surchargé (essai {essai}/{max_essais}), nouvelle tentative...")
+            if reponse.status_code in (429, 503):
+                print(f"IA indisponible (essai {essai}/{max_essais}), nouvelle tentative...")
                 time.sleep(3 * essai)
                 continue
             reponse.raise_for_status()
@@ -150,14 +149,15 @@ def demander_a_gemini(message_client, stock, max_essais=3):
             derniere_erreur = e
             time.sleep(3 * essai)
     else:
-        # Tous les essais ont échoué : on renvoie une réponse de secours
-        # plutôt que de laisser planter tout le traitement du message
-        raise derniere_erreur or Exception("Gemini indisponible après plusieurs essais")
+        raise derniere_erreur or Exception("IA indisponible après plusieurs essais")
 
-    # On extrait le texte, exactement comme le node "Code" faisait dans n8n
-    texte = data["candidates"][0]["content"]["parts"][0]["text"]
+    if data is None:
+        raise derniere_erreur or Exception("IA indisponible après plusieurs essais")
 
-    # Gemini renvoie parfois le JSON entouré de ```json ... ``` : on nettoie
+    # On extrait le texte de la réponse (format Groq/OpenAI, différent de Gemini)
+    texte = data["choices"][0]["message"]["content"]
+
+    # Nettoyage au cas où le modèle entoure le JSON de ```json ... ```
     texte_propre = re.sub(r"^```json\s*|\s*```$", "", texte.strip())
 
     return json.loads(texte_propre)
@@ -194,7 +194,7 @@ def generer_reponse(identifiant_client, texte_client):
     Ne s'occupe PAS d'envoyer le message : c'est au code appelant de choisir
     comment (WhatsApp, réponse HTTP directe, etc.)."""
     stock = lire_stock()
-    resultat = demander_a_gemini(texte_client, stock)
+    resultat = demander_a_ia(texte_client, stock)
 
     categorie = resultat.get("categorie", "AUTRE")
     reponse_client = resultat.get("reponse_client", "")
