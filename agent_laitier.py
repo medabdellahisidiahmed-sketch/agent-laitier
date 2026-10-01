@@ -144,6 +144,9 @@ Si COMMANDE ou QUESTION_STOCK_PRIX :
 - Si une info manque (quantité floue, produit ambigu), pose UNE SEULE
   question de clarification
 - Ne jamais annoncer un produit disponible s'il n'est pas dans le stock fourni
+- Dès que les produits et quantités sont clairs (même si tu demandes encore
+  une confirmation au client), remplis commande_structuree avec TOUS les
+  détails calculés
 
 Si RECLAMATION ou CREDIT_PAIEMENT :
 - Ne JAMAIS traiter la demande toi-même
@@ -157,9 +160,21 @@ MESSAGE DU CLIENT :
 {message}
 
 Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou
-après, exactement dans ce format :
-{{"categorie": "...", "reponse_client": "...", "escalade_humain": true/false,
-"commande_structuree": {{...}} ou null}}"""
+après, exactement dans ce format. Respecte EXACTEMENT ces noms de champs,
+sans jamais les changer ni en inventer d'autres :
+{{
+  "categorie": "COMMANDE" ou "QUESTION_STOCK_PRIX" ou "RECLAMATION" ou "CREDIT_PAIEMENT" ou "AUTRE",
+  "reponse_client": "texte de la réponse à envoyer au client",
+  "escalade_humain": true ou false,
+  "commande_structuree": null si pas de commande, sinon exactement :
+    {{
+      "produits": [
+        {{"nom": "...", "quantite": 0, "unite": "...", "prix_unitaire_mru": 0, "total_produit_mru": 0}}
+      ],
+      "total_commande_mru": 0,
+      "date_livraison_souhaitee": "..."
+    }}
+}}"""
 
 
 def demander_a_ia(message_client, stock, max_essais=3):
@@ -406,10 +421,18 @@ def consulter_commandes():
         return "Accès refusé. Ajoutez ?cle=VOTRE_MOT_DE_PASSE à l'adresse.", 403
 
     commandes = lire_lignes_jsonl(COMMANDES_FILE)
-    # On aplatit un peu les données pour l'affichage en tableau
+    # On aplatit les données pour l'affichage, avec une tolérance si l'IA
+    # a exceptionnellement utilisé un nom de champ légèrement différent
     for c in commandes:
-        c["total_mru"] = (c.get("commande", {}) or {}).get("total_commande_mru", "")
-        c["livraison"] = (c.get("commande", {}) or {}).get("date_livraison_souhaitee", "")
+        details = c.get("commande", {}) or {}
+        c["total_mru"] = (
+            details.get("total_commande_mru")
+            or details.get("montant_total_mru")
+            or details.get("total_general")
+            or details.get("prix_total_general")
+            or "?"
+        )
+        c["livraison"] = details.get("date_livraison_souhaitee", "")
 
     html = _page_html_donnees(
         "📦 Commandes enregistrées",
