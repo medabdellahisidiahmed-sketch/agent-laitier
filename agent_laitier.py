@@ -41,8 +41,10 @@ GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 NUMERO_RESPONSABLE = os.environ.get("NUMERO_RESPONSABLE")
 
 NOM_SOCIETE = os.environ.get("NOM_SOCIETE", "notre société")
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changez-moi")  # mot de passe pour consulter les données
 
 STOCK_FILE = "stock.json"
+STOCK_SHEET_URL = os.environ.get("STOCK_SHEET_URL")  # lien CSV publié du Google Sheet (optionnel)
 COMMANDES_FILE = "commandes.jsonl"   # une ligne JSON par commande, facile à relire plus tard
 ALERTES_FILE = "alertes.jsonl"       # une ligne JSON par alerte (réclamation, crédit)
 
@@ -50,10 +52,61 @@ ALERTES_FILE = "alertes.jsonl"       # une ligne JSON par alerte (réclamation, 
 # ============================================================
 # 2. LECTURE / ÉCRITURE DU STOCK
 # ============================================================
+def _normaliser_cle(cle):
+    """Rend la comparaison des en-têtes de colonnes insensible aux accents/espaces."""
+    remplacements = {"é": "e", "è": "e", "ê": "e", "à": "a"}
+    cle = cle.strip().lower()
+    for a, b in remplacements.items():
+        cle = cle.replace(a, b)
+    return cle
+
+
 def lire_stock():
-    """Lit le fichier stock.json et renvoie la liste des produits.
-    Vous pouvez modifier ce fichier à la main (avec un éditeur de texte
-    ou même Excel en exportant en .json) pour mettre le stock à jour."""
+    """Lit le stock depuis le Google Sheets publié (si STOCK_SHEET_URL est
+    configuré), sinon depuis le fichier local stock.json en secours.
+    Le Google Sheets est relu à CHAQUE message : toute modification faite
+    par la société est donc prise en compte immédiatement, sans redéploiement."""
+    if STOCK_SHEET_URL:
+        try:
+            import csv
+            import io
+
+            reponse = requests.get(STOCK_SHEET_URL, timeout=15)
+            reponse.raise_for_status()
+            # Le CSV Google peut contenir un BOM (caractère invisible en début
+            # de fichier) : on le retire pour éviter un souci sur la 1ère colonne
+            texte_csv = reponse.content.decode("utf-8-sig")
+
+            lecteur = csv.DictReader(io.StringIO(texte_csv))
+            stock = []
+            for ligne in lecteur:
+                # On associe chaque colonne, peu importe les accents utilisés
+                valeurs = {_normaliser_cle(k): v for k, v in ligne.items() if k}
+                nom_produit = valeurs.get("produit", "").strip()
+                if not nom_produit:
+                    continue  # ignore les lignes vides
+                try:
+                    stock_dispo = int(float(valeurs.get("stock disponible", 0) or 0))
+                except ValueError:
+                    stock_dispo = 0
+                try:
+                    prix = int(float(valeurs.get("prix unitaire (mru)", 0) or 0))
+                except ValueError:
+                    prix = 0
+                stock.append({
+                    "produit": nom_produit,
+                    "stock_disponible": stock_dispo,
+                    "prix_unitaire_mru": prix,
+                    "unite": valeurs.get("unite", "").strip(),
+                })
+            if stock:
+                return stock
+            print("Google Sheets stock vide ou illisible, utilisation du fichier local en secours.")
+        except Exception as e:
+            print("Erreur lecture stock Google Sheets, utilisation du fichier local en secours :", e)
+
+    # Solution de secours : fichier local (utilisé si STOCK_SHEET_URL n'est
+    # pas configuré, ou si Google Sheets est temporairement inaccessible)
     if not os.path.exists(STOCK_FILE):
         return []
     with open(STOCK_FILE, "r", encoding="utf-8") as f:
@@ -236,6 +289,53 @@ def traiter_message_whatsapp(numero_client, texte_client):
         )
 
 
+def lire_lignes_jsonl(fichier):
+    """Lit un fichier .jsonl (une ligne JSON par enregistrement) et renvoie
+    la liste des enregistrements, du plus récent au plus ancien."""
+    if not os.path.exists(fichier):
+        return []
+    lignes = []
+    with open(fichier, "r", encoding="utf-8") as f:
+        for ligne in f:
+            ligne = ligne.strip()
+            if ligne:
+                try:
+                    lignes.append(json.loads(ligne))
+                except json.JSONDecodeError:
+                    continue
+    return list(reversed(lignes))
+
+
+def _page_html_donnees(titre, enregistrements, colonnes):
+    """Construit une page HTML simple (tableau) pour afficher des données
+    de consultation (commandes ou alertes), sans rien installer de plus."""
+    lignes_html = ""
+    for enr in enregistrements:
+        cellules = ""
+        for col in colonnes:
+            valeur = enr
+            for partie in col.split("."):
+                valeur = valeur.get(partie, "") if isinstance(valeur, dict) else ""
+            cellules += f"<td>{valeur}</td>"
+        lignes_html += f"<tr>{cellules}</tr>"
+
+    entetes = "".join(f"<th>{c}</th>" for c in colonnes)
+    return f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
+<title>{titre}</title>
+<style>
+body{{font-family:Arial,sans-serif;background:#F4F6FA;padding:20px;}}
+h1{{color:#1B4D8C;font-size:18px;}}
+table{{border-collapse:collapse;width:100%;background:white;}}
+th,td{{border:1px solid #E3E7EF;padding:8px 10px;font-size:13px;text-align:left;}}
+th{{background:#1B4D8C;color:white;}}
+tr:nth-child(even){{background:#F8FAFD;}}
+p.vide{{color:#8A93A3;}}
+</style></head><body>
+<h1>{titre} — {len(enregistrements)} enregistrement(s)</h1>
+{'<table><tr>' + entetes + '</tr>' + lignes_html + '</table>' if enregistrements else '<p class="vide">Aucune donnée pour le moment.</p>'}
+</body></html>"""
+
+
 # ============================================================
 # 6. LE SERVEUR WEB QUI ÉCOUTE WHATSAPP
 # ============================================================
@@ -296,6 +396,43 @@ def chat_web():
     except Exception as e:
         print("Erreur /chat :", e)
         return jsonify({"reponse": "Désolé, une erreur technique est survenue. Réessayez."}), 200
+
+
+@app.route("/admin/commandes", methods=["GET"])
+def consulter_commandes():
+    """Page de consultation des commandes enregistrées.
+    Accès : https://votre-site.onrender.com/admin/commandes?cle=VOTRE_ADMIN_TOKEN"""
+    if request.args.get("cle") != ADMIN_TOKEN:
+        return "Accès refusé. Ajoutez ?cle=VOTRE_MOT_DE_PASSE à l'adresse.", 403
+
+    commandes = lire_lignes_jsonl(COMMANDES_FILE)
+    # On aplatit un peu les données pour l'affichage en tableau
+    for c in commandes:
+        c["total_mru"] = (c.get("commande", {}) or {}).get("total_commande_mru", "")
+        c["livraison"] = (c.get("commande", {}) or {}).get("date_livraison_souhaitee", "")
+
+    html = _page_html_donnees(
+        "📦 Commandes enregistrées",
+        commandes,
+        ["date", "id_client", "message_client", "total_mru", "livraison"],
+    )
+    return html, 200
+
+
+@app.route("/admin/alertes", methods=["GET"])
+def consulter_alertes():
+    """Page de consultation des alertes (réclamations, crédit) à traiter.
+    Accès : https://votre-site.onrender.com/admin/alertes?cle=VOTRE_ADMIN_TOKEN"""
+    if request.args.get("cle") != ADMIN_TOKEN:
+        return "Accès refusé. Ajoutez ?cle=VOTRE_MOT_DE_PASSE à l'adresse.", 403
+
+    alertes = lire_lignes_jsonl(ALERTES_FILE)
+    html = _page_html_donnees(
+        "⚠️ Alertes à traiter",
+        alertes,
+        ["date", "id_client", "categorie", "message_client", "reponse_envoyee"],
+    )
+    return html, 200
 
 
 @app.route("/", methods=["GET"])
