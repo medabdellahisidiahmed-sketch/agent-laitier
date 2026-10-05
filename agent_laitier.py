@@ -126,19 +126,42 @@ def ajouter_ligne(fichier, donnees, webhook_url=None):
     Sinon : fichier local .jsonl en secours (temporaire sur Render gratuit)."""
     donnees = dict(donnees)
     donnees["Date"] = datetime.now().isoformat(timespec="seconds")
+    nom = os.path.basename(fichier)
 
     if webhook_url:
         try:
             r = requests.post(webhook_url, json=donnees, timeout=15)
-            if r.status_code == 200 and r.json().get("succes"):
-                return  # écrit avec succès dans Google Sheets, terminé
-            print("Webhook Sheets a répondu sans succès, secours local :", r.text[:200])
+            succes, resume = _analyser_reponse_webhook(r)
+            if succes:
+                print(f"[SHEETS] OK ({nom}) : ligne ajoutée dans Google Sheets.")
+                return  # écrit avec succès, terminé
+            print(f"[SHEETS] ÉCHEC ({nom}) : {resume}. Écriture locale en secours.")
         except Exception as e:
-            print("Erreur webhook Google Sheets, secours local :", e)
+            print(f"[SHEETS] ERREUR ({nom}) : {e}. Écriture locale en secours.")
+    else:
+        print(f"[SHEETS] Aucun webhook configuré pour {nom} : écriture locale uniquement.")
 
     # Secours local (ou comportement par défaut si aucun webhook configuré)
     with open(fichier, "a", encoding="utf-8") as f:
         f.write(json.dumps(donnees, ensure_ascii=False) + "\n")
+
+
+def _analyser_reponse_webhook(reponse):
+    """Renvoie (succes: bool, resume: str) pour une réponse du webhook Google.
+    Le résumé indique le code HTTP et, si Google a renvoyé une page web
+    (connexion requise, page introuvable...), le titre de cette page."""
+    try:
+        succes = reponse.status_code == 200 and reponse.json().get("succes") is True
+    except ValueError:
+        succes = False
+
+    texte = reponse.text or ""
+    titre = re.search(r"<title>(.*?)</title>", texte, re.IGNORECASE | re.DOTALL)
+    if titre:
+        detail = f"page web reçue, titre « {titre.group(1).strip()[:80]} »"
+    else:
+        detail = f"réponse « {texte[:120]} »"
+    return succes, f"HTTP {reponse.status_code}, {detail}"
 
 
 # ============================================================
@@ -288,6 +311,9 @@ def generer_reponse(identifiant_client, texte_client):
     reponse_client = resultat.get("reponse_client", "")
     escalade = resultat.get("escalade_humain", False)
     commande = resultat.get("commande_structuree")
+
+    print(f"[IA] categorie={categorie} | escalade={escalade} | "
+          f"commande_structuree={'oui' if commande else 'NON (rien à enregistrer)'}")
 
     if escalade:
         ajouter_ligne(ALERTES_FILE, {
@@ -464,6 +490,48 @@ def consulter_alertes():
         ["Date", "Client", "Categorie", "Message", "Reponse"],
     )
     return html, 200
+
+
+@app.route("/admin/test-webhooks", methods=["GET"])
+def tester_webhooks():
+    """Diagnostic : envoie une ligne TEST vers chaque Google Sheets et affiche
+    le résultat. Accès : /admin/test-webhooks?cle=VOTRE_ADMIN_TOKEN"""
+    if request.args.get("cle") != ADMIN_TOKEN:
+        return "Accès refusé. Ajoutez ?cle=VOTRE_MOT_DE_PASSE à l'adresse.", 403
+
+    tests = [
+        ("Commandes", "COMMANDES_WEBHOOK_URL", COMMANDES_WEBHOOK_URL,
+         {"Client": "TEST", "Message": "test diagnostic", "Total MRU": 0, "Livraison": "-"}),
+        ("Alertes", "ALERTES_WEBHOOK_URL", ALERTES_WEBHOOK_URL,
+         {"Client": "TEST", "Categorie": "TEST", "Message": "test diagnostic", "Reponse": "-"}),
+    ]
+
+    blocs = ""
+    for nom, variable, url, ligne in tests:
+        if not url:
+            verdict = f"❌ NON CONFIGURÉ — la variable {variable} est absente ou vide sur Render."
+        else:
+            forme = ("se termine par /exec ✅" if url.rstrip("/").endswith("/exec")
+                     else "NE se termine PAS par /exec ⚠️ (utilisez le lien « Application Web » du déploiement)")
+            ligne["Date"] = datetime.now().isoformat(timespec="seconds")
+            try:
+                r = requests.post(url, json=ligne, timeout=20)
+                succes, resume = _analyser_reponse_webhook(r)
+                if succes:
+                    verdict = (f"✅ Le webhook a répondu « succès ». Une ligne TEST doit maintenant "
+                               f"figurer dans le Google Sheets « {nom} » (1er onglet). Lien : {forme}.")
+                else:
+                    verdict = f"❌ ÉCHEC — {resume}. Lien : {forme}."
+            except Exception as e:
+                verdict = f"❌ ERREUR de connexion — {e}. Lien : {forme}."
+        blocs += f"<h2>{nom}</h2><p>{verdict}</p>"
+
+    return f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
+<title>Test des webhooks</title>
+<style>body{{font-family:Arial,sans-serif;background:#F4F6FA;padding:20px;max-width:760px;}}
+h1{{color:#1B4D8C;font-size:18px;}}h2{{font-size:15px;margin-bottom:4px;}}
+p{{background:white;border:1px solid #E3E7EF;padding:10px;font-size:14px;line-height:1.5;}}</style>
+</head><body><h1>🔧 Test des webhooks Google Sheets</h1>{blocs}</body></html>""", 200
 
 
 @app.route("/", methods=["GET"])
