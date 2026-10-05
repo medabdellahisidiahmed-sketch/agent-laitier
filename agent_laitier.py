@@ -45,8 +45,15 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changez-moi")  # mot de passe pour 
 
 STOCK_FILE = "stock.json"
 STOCK_SHEET_URL = os.environ.get("STOCK_SHEET_URL")  # lien CSV publié du Google Sheet (optionnel)
-COMMANDES_FILE = "commandes.jsonl"   # une ligne JSON par commande, facile à relire plus tard
-ALERTES_FILE = "alertes.jsonl"       # une ligne JSON par alerte (réclamation, crédit)
+COMMANDES_FILE = "commandes.jsonl"   # secours local si le webhook Sheets n'est pas configuré
+ALERTES_FILE = "alertes.jsonl"       # secours local si le webhook Sheets n'est pas configuré
+
+# Liens "Application Web" Google Apps Script (voir guide de déploiement).
+# S'ils sont configurés, les commandes/alertes sont écrites directement
+# dans Google Sheets, de façon permanente (ne sont plus perdues au
+# redémarrage du serveur gratuit).
+COMMANDES_WEBHOOK_URL = os.environ.get("COMMANDES_WEBHOOK_URL")
+ALERTES_WEBHOOK_URL = os.environ.get("ALERTES_WEBHOOK_URL")
 
 
 # ============================================================
@@ -113,10 +120,23 @@ def lire_stock():
         return json.load(f)
 
 
-def ajouter_ligne(fichier, donnees):
-    """Ajoute une ligne JSON à la fin d'un fichier .jsonl
-    (commandes.jsonl ou alertes.jsonl), avec horodatage automatique."""
-    donnees["date"] = datetime.now().isoformat(timespec="seconds")
+def ajouter_ligne(fichier, donnees, webhook_url=None):
+    """Enregistre un événement (commande ou alerte) de façon durable.
+    Priorité : Google Sheets (webhook_url), si configuré et accessible.
+    Sinon : fichier local .jsonl en secours (temporaire sur Render gratuit)."""
+    donnees = dict(donnees)
+    donnees["Date"] = datetime.now().isoformat(timespec="seconds")
+
+    if webhook_url:
+        try:
+            r = requests.post(webhook_url, json=donnees, timeout=15)
+            if r.status_code == 200 and r.json().get("succes"):
+                return  # écrit avec succès dans Google Sheets, terminé
+            print("Webhook Sheets a répondu sans succès, secours local :", r.text[:200])
+        except Exception as e:
+            print("Erreur webhook Google Sheets, secours local :", e)
+
+    # Secours local (ou comportement par défaut si aucun webhook configuré)
     with open(fichier, "a", encoding="utf-8") as f:
         f.write(json.dumps(donnees, ensure_ascii=False) + "\n")
 
@@ -271,17 +291,18 @@ def generer_reponse(identifiant_client, texte_client):
 
     if escalade:
         ajouter_ligne(ALERTES_FILE, {
-            "id_client": identifiant_client,
-            "categorie": categorie,
-            "message_client": texte_client,
-            "reponse_envoyee": reponse_client,
-        })
+            "Client": identifiant_client,
+            "Categorie": categorie,
+            "Message": texte_client,
+            "Reponse": reponse_client,
+        }, webhook_url=ALERTES_WEBHOOK_URL)
     elif commande:
         ajouter_ligne(COMMANDES_FILE, {
-            "id_client": identifiant_client,
-            "message_client": texte_client,
-            "commande": commande,
-        })
+            "Client": identifiant_client,
+            "Message": texte_client,
+            "Total MRU": commande.get("total_commande_mru", ""),
+            "Livraison": commande.get("date_livraison_souhaitee", ""),
+        }, webhook_url=COMMANDES_WEBHOOK_URL)
 
     return resultat
 
@@ -421,23 +442,10 @@ def consulter_commandes():
         return "Accès refusé. Ajoutez ?cle=VOTRE_MOT_DE_PASSE à l'adresse.", 403
 
     commandes = lire_lignes_jsonl(COMMANDES_FILE)
-    # On aplatit les données pour l'affichage, avec une tolérance si l'IA
-    # a exceptionnellement utilisé un nom de champ légèrement différent
-    for c in commandes:
-        details = c.get("commande", {}) or {}
-        c["total_mru"] = (
-            details.get("total_commande_mru")
-            or details.get("montant_total_mru")
-            or details.get("total_general")
-            or details.get("prix_total_general")
-            or "?"
-        )
-        c["livraison"] = details.get("date_livraison_souhaitee", "")
-
     html = _page_html_donnees(
-        "📦 Commandes enregistrées",
+        "📦 Commandes enregistrées (secours local — voir aussi votre Google Sheets)",
         commandes,
-        ["date", "id_client", "message_client", "total_mru", "livraison"],
+        ["Date", "Client", "Message", "Total MRU", "Livraison"],
     )
     return html, 200
 
@@ -451,9 +459,9 @@ def consulter_alertes():
 
     alertes = lire_lignes_jsonl(ALERTES_FILE)
     html = _page_html_donnees(
-        "⚠️ Alertes à traiter",
+        "⚠️ Alertes à traiter (secours local — voir aussi votre Google Sheets)",
         alertes,
-        ["date", "id_client", "categorie", "message_client", "reponse_envoyee"],
+        ["Date", "Client", "Categorie", "Message", "Reponse"],
     )
     return html, 200
 

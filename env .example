@@ -1,0 +1,30 @@
+# Copiez ces lignes dans les "Environment Variables" de votre hébergeur
+# (Render, Railway...) et remplacez les valeurs par les vôtres.
+# NE PARTAGEZ JAMAIS CE FICHIER UNE FOIS REMPLI - il contient vos clés secrètes.
+
+WHATSAPP_TOKEN=votre_token_whatsapp_meta
+WHATSAPP_PHONE_NUMBER_ID=votre_id_numero_whatsapp
+WHATSAPP_VERIFY_TOKEN=laitier2026
+GROQ_API_KEY=votre_cle_api_groq
+GROQ_MODEL=llama-3.3-70b-versatile
+NUMERO_RESPONSABLE=22246123456
+NOM_SOCIETE=Laiterie Example
+
+# Optionnel : lien CSV publié de votre Google Sheets de stock.
+# Si rempli, le stock est lu en temps réel depuis Google Sheets à chaque
+# message (mise à jour immédiate, sans redéploiement).
+# Si laissé vide, le fichier local stock.json est utilisé à la place.
+# Comment l'obtenir : Google Sheets > Fichier > Partager > Publier sur le web > CSV
+STOCK_SHEET_URL=
+
+# Mot de passe simple pour consulter les commandes/alertes depuis le
+# navigateur (voir instructions ci-dessous). Choisissez une valeur
+# difficile à deviner, différente de l'exemple.
+ADMIN_TOKEN=changez-moi-123
+
+# Optionnel mais recommandé : liens "Application Web" Google Apps Script
+# pour enregistrer durablement commandes/alertes dans Google Sheets
+# (voir AppsScript_Commandes_Alertes.gs et le guide de déploiement).
+# Si laissés vides, un fichier local temporaire est utilisé à la place.
+COMMANDES_WEBHOOK_URL=
+ALERTES_WEBHOOK_URL=
