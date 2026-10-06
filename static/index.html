@@ -141,10 +141,19 @@
   #valider { width:100%; padding:14px; border:none; border-radius:12px; background:#1E8E4E; color:white; font-size:17px; font-weight:600; }
   #valider:disabled { opacity:.5; }
 
-  #confirmation { display:none; position:fixed; inset:0; background:rgba(20,30,50,.6); z-index:50; align-items:center; justify-content:center; padding:20px; }
-  #confirmation .carte { background:white; border-radius:18px; padding:22px; width:100%; max-width:380px; text-align:center; }
+  #confirmation, #recap { display:none; position:fixed; inset:0; background:rgba(20,30,50,.6); z-index:50; align-items:center; justify-content:center; padding:20px; }
+  #confirmation .carte, #recap .carte { background:white; border-radius:18px; padding:22px; width:100%; max-width:380px; text-align:center; }
   #confirmation .coche { font-size:56px; line-height:1; }
   #confirmation h2 { margin:8px 0 4px; color:#1E8E4E; font-size:22px; }
+  #recap h2 { margin:8px 0 4px; color:var(--bleu); font-size:22px; }
+  #recap ul { list-style:none; padding:0; margin:12px 0; text-align:left; font-size:16px; }
+  #recap li { padding:6px 0; border-bottom:1px solid #EEF1F6; }
+  #recap .total { font-size:20px; font-weight:700; margin:8px 0; }
+  #recap .liv { color:var(--gris); font-size:14px; margin-bottom:14px; }
+  #recap .btns { display:flex; gap:10px; }
+  #recap .btns button { flex:1; padding:14px; border:none; border-radius:12px; font-size:16px; font-weight:600; color:white; }
+  #recap #recap-oui { background:#1E8E4E; }
+  #recap #recap-non { background:#8A93A3; }
   #confirmation ul { list-style:none; padding:0; margin:12px 0; text-align:left; font-size:16px; }
   #confirmation li { padding:6px 0; border-bottom:1px solid #EEF1F6; }
   #confirmation .total { font-size:20px; font-weight:700; margin:8px 0; }
@@ -177,6 +186,18 @@
     </div>
     <button id="valider">✅ Commander — <span id="total">0</span> MRU</button>
   </div>
+
+  <div id="recap"><div class="carte">
+    <div class="coche">🛒</div>
+    <h2>Vérifiez votre commande</h2>
+    <ul id="recap-lignes"></ul>
+    <div class="total">Total : <span id="recap-total"></span> MRU</div>
+    <div class="liv">Livraison : <span id="recap-liv"></span></div>
+    <div class="btns">
+      <button id="recap-non">↩ Modifier</button>
+      <button id="recap-oui">✅ Confirmer</button>
+    </div>
+  </div></div>
 
   <div id="confirmation"><div class="carte">
     <div class="coche">✅</div>
@@ -306,11 +327,33 @@
     b.classList.add("actif"); jourLivraison = b.dataset.j;
   });
 
-  document.getElementById("valider").onclick = async () => {
+  document.getElementById("valider").onclick = () => {
+    const choisis = produits.filter(p => quantites[p.produit] > 0);
+    if (!choisis.length) return;
+    const ul = document.getElementById("recap-lignes");
+    ul.innerHTML = "";
+    let t = 0;
+    choisis.forEach(p => {
+      const li = document.createElement("li");
+      li.textContent = quantites[p.produit] + " × " + p.produit;
+      ul.appendChild(li);
+      t += quantites[p.produit] * p.prix_unitaire_mru;
+    });
+    document.getElementById("recap-total").textContent = t;
+    document.getElementById("recap-liv").textContent = jourLivraison === "aujourdhui" ? "Aujourd'hui" : "Demain";
+    document.getElementById("recap").style.display = "flex";
+  };
+
+  document.getElementById("recap-non").onclick = () => {
+    document.getElementById("recap").style.display = "none";
+  };
+
+  document.getElementById("recap-oui").onclick = async () => {
+    const bouton = document.getElementById("recap-oui");
+    bouton.disabled = true;
+    document.getElementById("recap").style.display = "none";
     const lignes = produits.filter(p => quantites[p.produit] > 0)
       .map(p => ({ produit: p.produit, quantite: quantites[p.produit] }));
-    const bouton = document.getElementById("valider");
-    bouton.disabled = true;
     try {
       const r = await fetch("/commander", { method: "POST", headers: {"Content-Type":"application/json"},
         body: JSON.stringify({ id_client: idClient, lignes, livraison: jourLivraison }) });
@@ -325,6 +368,7 @@
         quantites = {}; dessinerCatalogue();
       } else { alert(d.message); majTotal(); }
     } catch (e) { alert("Connexion impossible. Réessayez."); majTotal(); }
+    bouton.disabled = false;
   };
 
   document.getElementById("conf-ok").onclick = () => {
