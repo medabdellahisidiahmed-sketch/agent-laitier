@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Agent Laitier</title>
+<link rel="manifest" href="/static/manifest.json">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<meta name="theme-color" content="#1B4D8C">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Laitier">
+<style>
+  :root {
+    --bleu: #1B4D8C;
+    --bleu-clair: #E8F0FB;
+    --fond: #F4F6FA;
+    --texte: #1E2430;
+    --gris: #8A93A3;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--fond);
+    color: var(--texte);
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+  header {
+    background: var(--bleu);
+    color: white;
+    padding: 14px 16px;
+    padding-top: calc(14px + env(safe-area-inset-top, 0px));
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  header img { width: 34px; height: 34px; border-radius: 50%; }
+  header .titres { line-height: 1.25; }
+  header .titres b { font-size: 15px; }
+  header .titres span { font-size: 12px; opacity: 0.85; display: block; }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .bulle {
+    max-width: 80%;
+    padding: 10px 13px;
+    border-radius: 14px;
+    font-size: 14.5px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+  }
+  .client {
+    align-self: flex-end;
+    background: var(--bleu);
+    color: white;
+    border-bottom-right-radius: 4px;
+  }
+  .agent {
+    align-self: flex-start;
+    background: white;
+    border: 1px solid #E3E7EF;
+    border-bottom-left-radius: 4px;
+  }
+  .agent.chargement { color: var(--gris); font-style: italic; }
+  form#saisie {
+    display: flex;
+    gap: 8px;
+    padding: 10px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    background: white;
+    border-top: 1px solid #E3E7EF;
+    flex-shrink: 0;
+  }
+  #texte {
+    flex: 1;
+    border: 1px solid #D7DCE5;
+    border-radius: 20px;
+    padding: 11px 16px;
+    font-size: 15px;
+    outline: none;
+  }
+  #texte:focus { border-color: var(--bleu); }
+  button#envoyer {
+    background: var(--bleu);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 42px;
+    height: 42px;
+    flex-shrink: 0;
+    font-size: 18px;
+    cursor: pointer;
+  }
+  button#envoyer:disabled { opacity: 0.5; }
+  #installer {
+    display: none;
+    margin: 8px 16px 0 16px;
+    background: var(--bleu-clair);
+    color: var(--bleu);
+    border: 1px solid #C9DBF3;
+    border-radius: 10px;
+    padding: 9px 12px;
+    font-size: 13px;
+    text-align: center;
+    cursor: pointer;
+  }
+
+  #onglets { display:flex; flex-shrink:0; background:white; border-bottom:1px solid #E3E7EF; }
+  #onglets button { flex:1; padding:12px; font-size:15px; border:none; background:none; color:var(--gris); border-bottom:3px solid transparent; }
+  #onglets button.actif { color:var(--bleu); border-bottom-color:var(--bleu); font-weight:600; }
+  #catalogue { flex:1; overflow-y:auto; padding:12px; display:none; }
+  .produit { background:white; border:1px solid #E3E7EF; border-radius:14px; padding:10px; margin-bottom:10px; display:flex; align-items:center; gap:12px; }
+  .produit .photo { width:72px; height:72px; border-radius:10px; background:var(--bleu-clair); display:flex; align-items:center; justify-content:center; font-size:34px; object-fit:cover; flex-shrink:0; }
+  .produit .info { flex:1; line-height:1.3; }
+  .produit .info b { font-size:16px; }
+  .produit .info span { display:block; font-size:13px; color:var(--gris); }
+  .compteur { display:flex; align-items:center; gap:8px; }
+  .compteur button { width:42px; height:42px; border-radius:50%; border:none; font-size:24px; color:white; background:var(--bleu); }
+  .compteur button.moins { background:#C9D2E0; }
+  .compteur .qte { min-width:26px; text-align:center; font-size:18px; font-weight:600; }
+  #barre-commande { display:none; flex-shrink:0; background:white; border-top:1px solid #E3E7EF; padding:10px 12px calc(10px + env(safe-area-inset-bottom,0px)); }
+  #barre-commande .jours { display:flex; gap:8px; margin-bottom:8px; }
+  #barre-commande .jours button { flex:1; padding:10px; border-radius:10px; border:2px solid #C9DBF3; background:white; font-size:14px; }
+  #barre-commande .jours button.actif { background:var(--bleu-clair); border-color:var(--bleu); font-weight:600; }
+  #valider { width:100%; padding:14px; border:none; border-radius:12px; background:#1E8E4E; color:white; font-size:17px; font-weight:600; }
+  #valider:disabled { opacity:.5; }
+
+  #confirmation { display:none; position:fixed; inset:0; background:rgba(20,30,50,.6); z-index:50; align-items:center; justify-content:center; padding:20px; }
+  #confirmation .carte { background:white; border-radius:18px; padding:22px; width:100%; max-width:380px; text-align:center; }
+  #confirmation .coche { font-size:56px; line-height:1; }
+  #confirmation h2 { margin:8px 0 4px; color:#1E8E4E; font-size:22px; }
+  #confirmation ul { list-style:none; padding:0; margin:12px 0; text-align:left; font-size:16px; }
+  #confirmation li { padding:6px 0; border-bottom:1px solid #EEF1F6; }
+  #confirmation .total { font-size:20px; font-weight:700; margin:8px 0; }
+  #confirmation .liv { color:var(--gris); font-size:14px; margin-bottom:14px; }
+  #confirmation button { width:100%; padding:14px; border:none; border-radius:12px; background:var(--bleu); color:white; font-size:17px; font-weight:600; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <img src="/static/icon-192.png" alt="logo">
+    <div class="titres">
+      <b>Agent Laitier</b>
+      <span>Commandes &amp; questions produits</span>
+    </div>
+  </header>
+
+  <div id="installer">📲 Ajouter cette app à votre écran d'accueil</div>
+
+  <div id="onglets">
+    <button id="t-cat" class="actif">🛒 Commander</button>
+    <button id="t-chat">💬 Discuter</button>
+  </div>
+
+  <div id="catalogue"></div>
+  <div id="barre-commande">
+    <div class="jours">
+      <button data-j="aujourdhui">Aujourd'hui</button>
+      <button data-j="demain" class="actif">Demain</button>
+    </div>
+    <button id="valider">✅ Commander — <span id="total">0</span> MRU</button>
+  </div>
+
+  <div id="confirmation"><div class="carte">
+    <div class="coche">✅</div>
+    <h2>Commande reçue !</h2>
+    <ul id="conf-lignes"></ul>
+    <div class="total">Total : <span id="conf-total"></span> MRU</div>
+    <div class="liv">Livraison : <span id="conf-liv"></span></div>
+    <div class="liv">Nous vous contacterons pour confirmer.</div>
+    <button id="conf-ok">OK</button>
+  </div></div>
+
+  <div id="messages"></div>
+
+  <form id="saisie">
+    <input id="texte" type="text" placeholder="Écrivez votre message..." autocomplete="off" required>
+    <button id="envoyer" type="submit">➤</button>
+  </form>
+</div>
+
+<script>
+  const zoneMessages = document.getElementById("messages");
+  const formulaire = document.getElementById("saisie");
+  const champTexte = document.getElementById("texte");
+  const boutonEnvoyer = document.getElementById("envoyer");
+
+  // Identifiant simple pour cette session de discussion (gardé en mémoire du navigateur)
+  let idClient = sessionStorage.getItem("id_client");
+  if (!idClient) {
+    idClient = "web-" + Math.random().toString(36).slice(2, 10);
+    sessionStorage.setItem("id_client", idClient);
+  }
+
+  function ajouterBulle(texte, auteur) {
+    const div = document.createElement("div");
+    div.className = "bulle " + auteur;
+    div.textContent = texte;
+    zoneMessages.appendChild(div);
+    zoneMessages.scrollTop = zoneMessages.scrollHeight;
+    return div;
+  }
+
+  // Message d'accueil
+  ajouterBulle("Bonjour ! Écrivez-moi votre commande ou votre question (produits, prix, livraison).", "agent");
+
+  formulaire.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const message = champTexte.value.trim();
+    if (!message) return;
+
+    ajouterBulle(message, "client");
+    champTexte.value = "";
+    boutonEnvoyer.disabled = true;
+    const bulleAttente = ajouterBulle("…", "agent chargement");
+
+    try {
+      const reponse = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id_client: idClient, message: message })
+      });
+      const data = await reponse.json();
+      bulleAttente.remove();
+      ajouterBulle(data.reponse || "Désolé, une erreur est survenue.", "agent");
+    } catch (err) {
+      bulleAttente.remove();
+      ajouterBulle("Connexion impossible. Réessayez dans un instant.", "agent");
+    } finally {
+      boutonEnvoyer.disabled = false;
+      champTexte.focus();
+    }
+  });
+
+
+  // --- Catalogue à boutons ---
+  const zoneCat = document.getElementById("catalogue");
+  const barre = document.getElementById("barre-commande");
+  const btnCat = document.getElementById("t-cat");
+  const btnChat = document.getElementById("t-chat");
+  const zoneSaisie = document.getElementById("saisie");
+  let produits = [], quantites = {}, jourLivraison = "demain";
+
+  function afficherOnglet(cat) {
+    btnCat.classList.toggle("actif", cat);
+    btnChat.classList.toggle("actif", !cat);
+    zoneCat.style.display = cat ? "block" : "none";
+    barre.style.display = cat ? "block" : "none";
+    zoneMessages.style.display = cat ? "none" : "flex";
+    zoneSaisie.style.display = cat ? "none" : "flex";
+  }
+  btnCat.onclick = () => afficherOnglet(true);
+  btnChat.onclick = () => afficherOnglet(false);
+
+  function majTotal() {
+    let t = 0;
+    produits.forEach(p => t += (quantites[p.produit] || 0) * p.prix_unitaire_mru);
+    document.getElementById("total").textContent = t;
+    document.getElementById("valider").disabled = t === 0;
+  }
+
+  function dessinerCatalogue() {
+    zoneCat.innerHTML = "";
+    produits.forEach(p => {
+      const ligne = document.createElement("div");
+      ligne.className = "produit";
+      const photo = p.photo ? `<img class="photo" src="${p.photo}" alt="">` : `<div class="photo">🥛</div>`;
+      ligne.innerHTML = photo + `<div class="info"><b></b><span></span></div>
+        <div class="compteur"><button class="moins">−</button><div class="qte">0</div><button class="plus">+</button></div>`;
+      ligne.querySelector("b").textContent = p.produit;
+      ligne.querySelector("span").textContent = p.prix_unitaire_mru + " MRU / " + p.unite;
+      const q = ligne.querySelector(".qte");
+      ligne.querySelector(".plus").onclick = () => {
+        const n = (quantites[p.produit] || 0) + 1;
+        if (n > p.stock_disponible) return;
+        quantites[p.produit] = n; q.textContent = n; majTotal();
+      };
+      ligne.querySelector(".moins").onclick = () => {
+        const n = Math.max(0, (quantites[p.produit] || 0) - 1);
+        quantites[p.produit] = n; q.textContent = n; majTotal();
+      };
+      zoneCat.appendChild(ligne);
+    });
+    majTotal();
+  }
+
+  document.querySelectorAll(".jours button").forEach(b => b.onclick = () => {
+    document.querySelectorAll(".jours button").forEach(x => x.classList.remove("actif"));
+    b.classList.add("actif"); jourLivraison = b.dataset.j;
+  });
+
+  document.getElementById("valider").onclick = async () => {
+    const lignes = produits.filter(p => quantites[p.produit] > 0)
+      .map(p => ({ produit: p.produit, quantite: quantites[p.produit] }));
+    const bouton = document.getElementById("valider");
+    bouton.disabled = true;
+    try {
+      const r = await fetch("/commander", { method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ id_client: idClient, lignes, livraison: jourLivraison }) });
+      const d = await r.json();
+      if (d.ok) {
+        const ul = document.getElementById("conf-lignes");
+        ul.innerHTML = "";
+        d.resume.forEach(t => { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); });
+        document.getElementById("conf-total").textContent = d.total;
+        document.getElementById("conf-liv").textContent = d.livraison;
+        document.getElementById("confirmation").style.display = "flex";
+        quantites = {}; dessinerCatalogue();
+      } else { alert(d.message); majTotal(); }
+    } catch (e) { alert("Connexion impossible. Réessayez."); majTotal(); }
+  };
+
+  document.getElementById("conf-ok").onclick = () => {
+    document.getElementById("confirmation").style.display = "none";
+  };
+
+  fetch("/catalogue").then(r => r.json()).then(d => { produits = d; dessinerCatalogue(); })
+    .catch(() => { zoneCat.textContent = "Catalogue indisponible. Utilisez l'onglet Discuter."; });
+  afficherOnglet(true);
+
+  // --- Installation PWA (icône sur l'écran d'accueil) ---
+  let evenementInstall = null;
+  const boutonInstaller = document.getElementById("installer");
+
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    evenementInstall = e;
+    boutonInstaller.style.display = "block";
+  });
+
+  boutonInstaller.addEventListener("click", async () => {
+    if (!evenementInstall) return;
+    evenementInstall.prompt();
+    await evenementInstall.userChoice;
+    evenementInstall = null;
+    boutonInstaller.style.display = "none";
+  });
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/static/sw.js").catch(() => {});
+  }
+</script>
+</body>
+</html>
