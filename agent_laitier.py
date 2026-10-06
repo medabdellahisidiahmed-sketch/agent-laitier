@@ -105,6 +105,8 @@ def lire_stock():
                     "stock_disponible": stock_dispo,
                     "prix_unitaire_mru": prix,
                     "unite": valeurs.get("unite", "").strip(),
+                    "photo": valeurs.get("photo", "").strip(),
+                    "code": valeurs.get("code", "").strip(),
                 })
             if stock:
                 return stock
@@ -228,7 +230,7 @@ def demander_a_ia(message_client, stock, max_essais=3):
 
     prompt = PROMPT_SYSTEME.format(
         societe=NOM_SOCIETE,
-        stock=json.dumps(stock, ensure_ascii=False),
+        stock=json.dumps([{k: v for k, v in p.items() if k != "photo"} for p in stock], ensure_ascii=False),
         message=message_client,
     )
 
@@ -458,6 +460,54 @@ def chat_web():
     except Exception as e:
         print("Erreur /chat :", e)
         return jsonify({"reponse": "Désolé, une erreur technique est survenue. Réessayez."}), 200
+
+
+@app.route("/catalogue", methods=["GET"])
+def catalogue():
+    """Liste des produits pour le catalogue à boutons (photos, prix, stock)."""
+    return jsonify(lire_stock()), 200
+
+
+@app.route("/commander", methods=["POST"])
+def commander():
+    """Commande par boutons (sans saisie de texte, sans IA).
+    Le total est recalculé ICI à partir du stock : le téléphone du client
+    ne peut pas tricher sur les prix."""
+    from datetime import timedelta
+    data = request.get_json(silent=True) or {}
+    id_client = (data.get("id_client") or "web-anonyme")[:60]
+    lignes = data.get("lignes") or []
+    jour = data.get("livraison", "demain")
+
+    stock = {p["produit"]: p for p in lire_stock()}
+    total, resume = 0, []
+    for l in lignes:
+        produit = stock.get(l.get("produit"))
+        try:
+            qte = int(l.get("quantite", 0))
+        except (TypeError, ValueError):
+            qte = 0
+        if not produit or qte <= 0:
+            continue
+        if qte > produit["stock_disponible"]:
+            return jsonify({"ok": False, "message":
+                f"Désolé, il reste seulement {produit['stock_disponible']} {produit['produit']}."}), 200
+        total += qte * produit["prix_unitaire_mru"]
+        resume.append(f"{qte} x {produit['produit']}")
+
+    if not resume:
+        return jsonify({"ok": False, "message": "Aucun produit choisi."}), 200
+
+    date_liv = datetime.now() + timedelta(days=0 if jour == "aujourdhui" else 1)
+    ajouter_ligne(COMMANDES_FILE, {
+        "Client": id_client,
+        "Message": "Catalogue : " + " ; ".join(resume),
+        "Total MRU": total,
+        "Livraison": date_liv.strftime("%Y-%m-%d"),
+    }, webhook_url=COMMANDES_WEBHOOK_URL)
+    print(f"[CATALOGUE] commande {id_client} total={total}")
+    return jsonify({"ok": True, "total": total, "resume": resume,
+                    "livraison": date_liv.strftime("%Y-%m-%d")}), 200
 
 
 @app.route("/admin/commandes", methods=["GET"])
