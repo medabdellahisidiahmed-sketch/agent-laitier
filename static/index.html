@@ -140,6 +140,16 @@
   #barre-commande .jours button.actif { background:var(--bleu-clair); border-color:var(--bleu); font-weight:600; }
   #valider { width:100%; padding:14px; border:none; border-radius:12px; background:#1E8E4E; color:white; font-size:17px; font-weight:600; }
   #valider:disabled { opacity:.5; }
+
+  #confirmation { display:none; position:fixed; inset:0; background:rgba(20,30,50,.6); z-index:50; align-items:center; justify-content:center; padding:20px; }
+  #confirmation .carte { background:white; border-radius:18px; padding:22px; width:100%; max-width:380px; text-align:center; }
+  #confirmation .coche { font-size:56px; line-height:1; }
+  #confirmation h2 { margin:8px 0 4px; color:#1E8E4E; font-size:22px; }
+  #confirmation ul { list-style:none; padding:0; margin:12px 0; text-align:left; font-size:16px; }
+  #confirmation li { padding:6px 0; border-bottom:1px solid #EEF1F6; }
+  #confirmation .total { font-size:20px; font-weight:700; margin:8px 0; }
+  #confirmation .liv { color:var(--gris); font-size:14px; margin-bottom:14px; }
+  #confirmation button { width:100%; padding:14px; border:none; border-radius:12px; background:var(--bleu); color:white; font-size:17px; font-weight:600; }
 </style>
 </head>
 <body>
@@ -167,6 +177,16 @@
     </div>
     <button id="valider">✅ Commander — <span id="total">0</span> MRU</button>
   </div>
+
+  <div id="confirmation"><div class="carte">
+    <div class="coche">✅</div>
+    <h2>Commande reçue !</h2>
+    <ul id="conf-lignes"></ul>
+    <div class="total">Total : <span id="conf-total"></span> MRU</div>
+    <div class="liv">Livraison : <span id="conf-liv"></span></div>
+    <div class="liv">Nous vous contacterons pour confirmer.</div>
+    <button id="conf-ok">OK</button>
+  </div></div>
 
   <div id="messages"></div>
 
@@ -296,10 +316,19 @@
         body: JSON.stringify({ id_client: idClient, lignes, livraison: jourLivraison }) });
       const d = await r.json();
       if (d.ok) {
-        alert("✅ Commande envoyée !\n" + d.resume.join("\n") + "\nTotal : " + d.total + " MRU\nLivraison : " + d.livraison);
+        const ul = document.getElementById("conf-lignes");
+        ul.innerHTML = "";
+        d.resume.forEach(t => { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); });
+        document.getElementById("conf-total").textContent = d.total;
+        document.getElementById("conf-liv").textContent = d.livraison;
+        document.getElementById("confirmation").style.display = "flex";
         quantites = {}; dessinerCatalogue();
       } else { alert(d.message); majTotal(); }
     } catch (e) { alert("Connexion impossible. Réessayez."); majTotal(); }
+  };
+
+  document.getElementById("conf-ok").onclick = () => {
+    document.getElementById("confirmation").style.display = "none";
   };
 
   fetch("/catalogue").then(r => r.json()).then(d => { produits = d; dessinerCatalogue(); })
