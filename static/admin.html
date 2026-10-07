@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tableau de bord</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#1B4D8C">
+<style>
+  :root {
+    --bleu:#1B4D8C; --bleu-clair:#E8F0FB; --fond:#F4F6FA; --texte:#1E2430;
+    --gris:#5B6B86; --bord:#E3E7EF; --vert:#1E8E4E; --rouge:#B3372B; --orange:#B26B00;
+    color-scheme: light;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif; background:var(--fond); color:var(--texte); }
+  header { background:var(--bleu); color:#fff; padding:14px 16px; padding-top:calc(14px + env(safe-area-inset-top,0px)); display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:5; }
+  header b { font-size:17px; }
+  header small { display:block; font-size:12px; opacity:.85; }
+  header button { background:rgba(255,255,255,.18); color:#fff; border:none; border-radius:10px; padding:10px 14px; font-size:15px; }
+  main { max-width:1180px; margin:0 auto; padding:12px 12px calc(84px + env(safe-area-inset-bottom,0px)); }
+  /* Téléphone : une seule section visible à la fois (onglets en bas) */
+  .section { display:none; }
+  .section.actif { display:block; }
+  #onglets-bas { position:fixed; left:0; right:0; bottom:0; z-index:6; display:flex; background:#fff; border-top:1px solid var(--bord); padding-bottom:env(safe-area-inset-bottom,0px); }
+  #onglets-bas button { flex:1; border:none; background:none; padding:9px 2px 8px; font-size:12px; color:var(--gris); position:relative; }
+  #onglets-bas button .ico { display:block; font-size:20px; line-height:1.2; }
+  #onglets-bas button.actif { color:var(--bleu); font-weight:700; }
+  #onglets-bas button.actif::before { content:""; position:absolute; top:0; left:25%; right:25%; height:3px; background:var(--bleu); border-radius:0 0 3px 3px; }
+  #onglets-bas .pastille { position:absolute; top:3px; left:calc(50% + 6px); min-width:18px; height:18px; border-radius:9px; background:var(--rouge); color:#fff; font-size:11px; line-height:18px; font-weight:700; padding:0 4px; }
+  /* Grand écran ou paysage : tout est visible en colonnes, plus d'onglets */
+  @media (min-width: 760px) {
+    #onglets-bas { display:none; }
+    main { padding-bottom:24px; display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:start; }
+    main > .section { display:block; }
+    main > #avertissements { grid-column:1 / -1; }
+    main > #s-accueil { display:contents; }
+    #bloc-kpi { grid-column:1 / -1; grid-template-columns:repeat(4,1fr); }
+    #liens { grid-column:1 / -1; }
+    .carte { margin-bottom:0; }
+  }
+  @media (min-width: 1100px) {
+    main { grid-template-columns:1fr 1fr 1fr; }
+    #bloc-kpi { grid-template-columns:repeat(4,1fr); }
+    #c-stock { grid-column:span 1; }
+    #c-graphe { grid-column:span 2; }
+    #liens { grid-column:auto !important; grid-template-columns:1fr; align-content:start; margin-top:0 !important; }
+  }
+  /* Stock en tuiles : 2 colonnes pour gagner de la hauteur */
+  #l-stock { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  #l-stock .ligne { border:1px solid var(--bord); border-radius:12px; padding:8px 10px; }
+  #l-stock .ligne .haut { flex-direction:column; gap:4px; font-size:13px; }
+  #l-stock .ligne .bas { font-size:12px; }
+  #l-stock .vide { grid-column:1 / -1; }
+  .grille { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px; }
+  .kpi { background:#fff; border:1px solid var(--bord); border-radius:14px; padding:12px; }
+  .kpi .label { font-size:12px; color:var(--gris); }
+  .kpi .valeur { font-size:24px; font-weight:700; margin-top:2px; }
+  .kpi .sous { font-size:12px; color:var(--gris); margin-top:2px; }
+  .carte { background:#fff; border:1px solid var(--bord); border-radius:14px; padding:12px; margin-bottom:12px; }
+  .carte h2 { font-size:15px; margin:0 0 10px; }
+  .barres { display:flex; align-items:flex-end; gap:6px; height:140px; padding-top:18px; }
+  .col { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; min-width:0; }
+  .col .barre { width:100%; background:var(--bleu); border-radius:6px 6px 0 0; min-height:2px; }
+  .col.auj .barre { background:var(--vert); }
+  .col .v { font-size:10px; color:var(--gris); margin-bottom:2px; white-space:nowrap; }
+  .col .j { font-size:11px; color:var(--gris); margin-top:4px; }
+  .ligne { padding:10px 0; border-top:1px solid var(--bord); }
+  .ligne:first-of-type { border-top:none; }
+  .ligne .haut { display:flex; justify-content:space-between; gap:8px; font-size:14px; font-weight:600; }
+  .ligne .bas { font-size:13px; color:var(--gris); margin-top:2px; word-break:break-word; }
+  .badge { display:inline-block; font-size:11px; font-weight:600; border-radius:999px; padding:2px 8px; background:var(--bleu-clair); color:var(--bleu); }
+  .badge.rouge { background:#FBE9E7; color:var(--rouge); }
+  .badge.orange { background:#FFF1DB; color:var(--orange); }
+  .niveau { height:8px; background:#E8EDF5; border-radius:999px; margin-top:6px; overflow:hidden; }
+  .niveau i { display:block; height:100%; border-radius:999px; background:var(--vert); }
+  .niveau i.bas { background:#D98A00; } .niveau i.rupture { background:var(--rouge); }
+  .badge.vert { background:#E3F4EA; color:var(--vert); }
+  .resume-stock { font-size:13px; color:var(--gris); margin:-4px 0 8px; }
+  .vide { color:var(--gris); font-size:14px; padding:6px 0; }
+  .alerte-source { background:#FFF1DB; color:var(--orange); border-radius:12px; padding:10px 12px; font-size:13px; margin-bottom:12px; }
+  .liens { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .liens a { display:block; text-align:center; text-decoration:none; background:var(--bleu); color:#fff; border-radius:12px; padding:14px 8px; font-weight:600; font-size:15px; }
+  .liens a.sec { background:#5B6B86; }
+  /* connexion */
+  #connexion { max-width:360px; margin:12vh auto 0; padding:0 16px; }
+  #connexion .carte { padding:20px; }
+  #connexion input { width:100%; padding:13px; border:1px solid #D7DCE5; border-radius:10px; font-size:16px; margin:10px 0; }
+  #connexion button { width:100%; padding:14px; border:none; border-radius:12px; background:var(--bleu); color:#fff; font-size:16px; font-weight:600; }
+  #erreur { color:var(--rouge); font-size:14px; min-height:20px; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+
+<div id="connexion">
+  <div class="carte">
+    <h2 style="font-size:19px">🔒 Espace gestion</h2>
+    <div style="color:var(--gris);font-size:14px">Entrez le mot de passe administrateur.</div>
+    <input id="mdp" type="password" placeholder="Mot de passe" autocomplete="current-password">
+    <div id="erreur"></div>
+    <button id="entrer">Entrer</button>
+  </div>
+</div>
+
+<div id="tableau" hidden>
+  <header>
+    <div><b>📊 Tableau de bord</b><small id="maj">…</small></div>
+    <button id="actualiser" aria-label="Actualiser">↻ Actualiser</button>
+  </header>
+  <main>
+    <div id="avertissements"></div>
+
+    <section class="section actif" id="s-accueil">
+      <div class="grille" id="bloc-kpi">
+        <div class="kpi"><div class="label">Commandes aujourd'hui</div><div class="valeur" id="k-cmd">–</div><div class="sous" id="k-liv"></div></div>
+        <div class="kpi"><div class="label">Ventes aujourd'hui (MRU)</div><div class="valeur" id="k-tot">–</div><div class="sous" id="k-hier"></div></div>
+        <div class="kpi"><div class="label">Ventes 7 jours (MRU)</div><div class="valeur" id="k-7j">–</div><div class="sous" id="k-nb7"></div></div>
+        <div class="kpi"><div class="label">Alertes (7 jours)</div><div class="valeur" id="k-alt">–</div><div class="sous" id="k-cat"></div></div>
+      </div>
+      <div class="carte" id="c-graphe">
+        <h2>Ventes des 7 derniers jours (MRU)</h2>
+        <div class="barres" id="graphe" role="img" aria-label="Ventes par jour sur 7 jours"></div>
+      </div>
+      <div class="liens" id="liens" style="margin-top:12px">
+        <a id="lien-produits" href="#">🛠 Gérer les produits</a>
+        <a class="sec" href="/" target="_blank" rel="noopener">🛒 Application client</a>
+      </div>
+    </section>
+
+    <section class="section" id="s-stock">
+      <div class="carte" id="c-stock">
+        <h2>📦 État du stock</h2>
+        <div class="resume-stock" id="r-stock"></div>
+        <div id="l-stock"></div>
+      </div>
+    </section>
+
+    <section class="section" id="s-commandes">
+      <div class="carte"><h2>Dernières commandes</h2><div id="l-cmd"></div></div>
+    </section>
+
+    <section class="section" id="s-alertes">
+      <div class="carte"><h2>Dernières alertes</h2><div id="l-alt"></div></div>
+    </section>
+  </main>
+
+  <nav id="onglets-bas" aria-label="Sections">
+    <button data-s="accueil" class="actif"><span class="ico">📊</span>Accueil</button>
+    <button data-s="stock"><span class="ico">📦</span>Stock<span class="pastille" id="p-stock" hidden></span></button>
+    <button data-s="commandes"><span class="ico">🧾</span>Commandes</button>
+    <button data-s="alertes"><span class="ico">⚠️</span>Alertes<span class="pastille" id="p-alertes" hidden></span></button>
+  </nav>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const CAT = { COMMANDE:["Commande",""], QUESTION_STOCK_PRIX:["Question",""], RECLAMATION:["Réclamation","rouge"], CREDIT_PAIEMENT:["Crédit / paiement","orange"], AUTRE:["Autre",""] };
+  const nf = new Intl.NumberFormat("fr-FR");
+  let jeton = "";
+  let minuteur = null;
+
+  function lire(k){ try { return localStorage.getItem(k) || ""; } catch(e){ return ""; } }
+  function ecrire(k,v){ try { v ? localStorage.setItem(k,v) : localStorage.removeItem(k); } catch(e){} }
+
+  function el(tag, classe, texte){ const e=document.createElement(tag); if(classe) e.className=classe; if(texte!==undefined) e.textContent=texte; return e; }
+  function heure(iso){ return (iso||"").replace("T"," ").slice(5,16); }
+
+  async function charger(){
+    $("actualiser").disabled = true;
+    try {
+      const r = await fetch("/admin/api/dashboard", { headers: { "X-Admin-Token": jeton }, cache:"no-store" });
+      if (r.status === 401) { deconnecter("Mot de passe incorrect."); return; }
+      const d = await r.json();
+      afficher(d);
+    } catch(e) {
+      $("maj").textContent = "Connexion impossible";
+    } finally { $("actualiser").disabled = false; }
+  }
+
+  function afficher(d){
+    $("maj").textContent = "Mis à jour à " + (d.maintenant||"").slice(11,16);
+
+    const av = $("avertissements"); av.innerHTML = "";
+    ["commandes","alertes"].forEach(n => {
+      const s = d.sources[n];
+      if (s.erreur) av.appendChild(el("div","alerte-source","⚠ " + (n==="commandes"?"Commandes":"Alertes") + " : " + s.erreur));
+      else if (s.source === "local") av.appendChild(el("div","alerte-source","ℹ " + (n==="commandes"?"Commandes":"Alertes") + " : lien Google Sheets non configuré, données de secours (temporaires)."));
+    });
+
+    const k = d.kpi;
+    $("k-cmd").textContent = nf.format(k.cmd_aujourdhui);
+    $("k-liv").textContent = k.livraison_aujourdhui + " à livrer auj. · " + k.livraison_demain + " demain";
+    $("k-tot").textContent = nf.format(k.total_aujourdhui);
+    $("k-hier").textContent = "Hier : " + nf.format(k.total_hier);
+    $("k-7j").textContent = nf.format(k.total_7j);
+    $("k-nb7").textContent = k.nb_7j + " commande(s)";
+    $("k-alt").textContent = nf.format(k.alertes_7j);
+    const cats = Object.entries(d.alertes_par_categorie).map(([c,n]) => (CAT[c]||[c])[0] + " " + n).join(" · ");
+    $("k-cat").textContent = cats || "Aucune alerte";
+
+    // graphique en barres
+    const g = $("graphe"); g.innerHTML = "";
+    const max = Math.max(1, ...d.serie_7j.map(x => x.total));
+    const jours = ["dim","lun","mar","mer","jeu","ven","sam"];
+    d.serie_7j.forEach((x,i) => {
+      const col = el("div","col" + (i===d.serie_7j.length-1 ? " auj":""));
+      col.appendChild(el("div","v", x.total ? nf.format(Math.round(x.total)) : ""));
+      const b = el("div","barre"); b.style.height = Math.round(x.total/max*100) + "%";
+      b.title = x.jour + " : " + nf.format(x.total) + " MRU (" + x.nb + " cmd)";
+      col.appendChild(b);
+      col.appendChild(el("div","j", jours[new Date(x.jour+"T12:00:00").getDay()]));
+      g.appendChild(col);
+    });
+
+    // listes
+    const lc = $("l-cmd"); lc.innerHTML = "";
+    if (!d.dernieres_commandes.length) lc.appendChild(el("div","vide","Aucune commande pour le moment."));
+    d.dernieres_commandes.forEach(c => {
+      const l = el("div","ligne");
+      const h = el("div","haut"); h.appendChild(el("span","", c.Client || "Client")); h.appendChild(el("span","", nf.format(Number(c["Total MRU"])||0) + " MRU"));
+      l.appendChild(h);
+      l.appendChild(el("div","bas", heure(c.Date) + (c.Livraison ? " · livraison " + String(c.Livraison).slice(0,10) : "")));
+      if (c.Message) l.appendChild(el("div","bas", c.Message));
+      lc.appendChild(l);
+    });
+
+    const la = $("l-alt"); la.innerHTML = "";
+    if (!d.dernieres_alertes.length) la.appendChild(el("div","vide","Aucune alerte. 👍"));
+    d.dernieres_alertes.forEach(a => {
+      const c = CAT[a.Categorie] || [a.Categorie || "Autre",""];
+      const l = el("div","ligne");
+      const h = el("div","haut"); h.appendChild(el("span","", a.Client || "Client")); h.appendChild(el("span","badge " + c[1], c[0]));
+      l.appendChild(h);
+      l.appendChild(el("div","bas", heure(a.Date)));
+      if (a.Message) l.appendChild(el("div","bas", a.Message));
+      la.appendChild(l);
+    });
+
+    const r = d.stock_resume;
+    $("r-stock").textContent = r.total
+      ? r.rupture + " rupture(s) · " + r.bas + " stock bas · " + r.ok + " correct(s)"
+      : "";
+    const ls = $("l-stock"); ls.innerHTML = "";
+    if (!d.stock.length) ls.appendChild(el("div","vide","Aucun produit dans le stock."));
+    const maxStock = Math.max(1, ...d.stock.map(p => p.stock));
+    d.stock.forEach(p => {
+      const l = el("div","ligne"); const h = el("div","haut");
+      h.appendChild(el("span","", p.produit));
+      const lib = p.niveau==="rupture" ? "Rupture" : (p.niveau==="bas" ? "Stock bas" : "OK");
+      h.appendChild(el("span","badge " + (p.niveau==="rupture"?"rouge":(p.niveau==="bas"?"orange":"vert")), lib));
+      l.appendChild(h);
+      l.appendChild(el("div","bas", nf.format(p.stock) + " " + (p.unite||"") + " · " + nf.format(p.prix) + " MRU · alerte à " + p.seuil));
+      const n = el("div","niveau"); const i = el("i", p.niveau); i.style.width = Math.max(2, Math.round(p.stock/maxStock*100)) + "%";
+      n.appendChild(i); l.appendChild(n);
+      ls.appendChild(l);
+    });
+
+    const pb = d.stock_resume.rupture + d.stock_resume.bas;
+    $("p-stock").textContent = pb; $("p-stock").hidden = pb === 0;
+    $("p-alertes").textContent = d.kpi.alertes_7j; $("p-alertes").hidden = d.kpi.alertes_7j === 0;
+    $("lien-produits").href = "/admin/produits?cle=" + encodeURIComponent(jeton);
+  }
+
+  function montrer(nom){
+    document.querySelectorAll(".section").forEach(s => s.classList.toggle("actif", s.id === "s-" + nom));
+    document.querySelectorAll("#onglets-bas button").forEach(b => b.classList.toggle("actif", b.dataset.s === nom));
+    window.scrollTo(0, 0);
+  }
+  document.querySelectorAll("#onglets-bas button").forEach(b => b.onclick = () => montrer(b.dataset.s));
+
+  function ouvrir(){
+    $("connexion").hidden = true; $("tableau").hidden = false;
+    charger();
+    clearInterval(minuteur);
+    minuteur = setInterval(() => { if (!document.hidden) charger(); }, 60000);
+  }
+  function deconnecter(msg){
+    clearInterval(minuteur); ecrire("admin_jeton","");
+    jeton = ""; $("tableau").hidden = true; $("connexion").hidden = false;
+    $("erreur").textContent = msg || "";
+  }
+  async function entrer(){
+    const mdp = $("mdp").value;
+    if (!mdp) return;
+    jeton = mdp; $("erreur").textContent = "";
+    const r = await fetch("/admin/api/dashboard", { headers: { "X-Admin-Token": jeton } }).catch(() => null);
+    if (!r) { $("erreur").textContent = "Connexion impossible."; return; }
+    if (r.status === 401) { $("erreur").textContent = "Mot de passe incorrect."; jeton = ""; return; }
+    ecrire("admin_jeton", jeton); $("mdp").value = ""; ouvrir();
+  }
+  $("entrer").onclick = entrer;
+  $("mdp").addEventListener("keydown", e => { if (e.key === "Enter") entrer(); });
+  $("actualiser").onclick = charger;
+
+  jeton = lire("admin_jeton");
+  if (jeton) ouvrir();
+</script>
+</body>
+</html>
