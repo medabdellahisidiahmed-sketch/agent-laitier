@@ -53,6 +53,7 @@ ALERTES_FILE = "alertes.jsonl"       # secours local si le webhook Sheets n'est 
 # dans Google Sheets, de façon permanente (ne sont plus perdues au
 # redémarrage du serveur gratuit).
 COMMANDES_WEBHOOK_URL = os.environ.get("COMMANDES_WEBHOOK_URL")
+STOCK_WEBHOOK_URL = os.environ.get("STOCK_WEBHOOK_URL")  # Apps Script du Google Sheet STOCK (gestion produits/photos/prix)
 ALERTES_WEBHOOK_URL = os.environ.get("ALERTES_WEBHOOK_URL")
 
 
@@ -403,6 +404,131 @@ p.vide{{color:#8A93A3;}}
 # ============================================================
 # 6. LE SERVEUR WEB QUI ÉCOUTE WHATSAPP
 # ============================================================
+
+PAGE_ADMIN_PRODUITS = """<!DOCTYPE html>
+<html lang="fr"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gestion des produits</title>
+<style>
+ body{font-family:-apple-system,"Segoe UI",Arial,sans-serif;background:#F4F6FA;margin:0;color:#1E2430}
+ header{background:#1B4D8C;color:#fff;padding:14px 16px;font-size:17px;font-weight:600}
+ main{max-width:760px;margin:0 auto;padding:12px}
+ .carte{background:#fff;border:1px solid #E3E7EF;border-radius:14px;padding:12px;margin-bottom:12px}
+ .ligne{display:flex;gap:12px;align-items:flex-start}
+ .vignette{width:84px;height:84px;border-radius:10px;background:#E8F0FB;object-fit:cover;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:36px}
+ .champs{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+ .champs label{font-size:12px;color:#8A93A3;display:block}
+ .champs input{width:100%;padding:9px;border:1px solid #D7DCE5;border-radius:8px;font-size:15px;box-sizing:border-box}
+ .champs .large{grid-column:1/3}
+ .actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+ button,.btnphoto{padding:11px 14px;border:none;border-radius:10px;font-size:14px;font-weight:600;color:#fff;background:#1B4D8C;cursor:pointer}
+ .btnphoto{background:#5B6B86;display:inline-block}
+ .vert{background:#1E8E4E}.rouge{background:#C0392B}
+ input[type=file]{display:none}
+ #msg{position:fixed;left:12px;right:12px;bottom:12px;padding:12px;border-radius:10px;color:#fff;display:none;text-align:center;z-index:9}
+ .info{font-size:13px;color:#5B6B86;background:#E8F0FB;border-radius:10px;padding:10px;margin-bottom:12px}
+</style></head><body>
+<header>🛠 Gestion des produits</header>
+<main>
+ <div class="info">Modifiez le prix, le stock ou la photo d'un produit puis appuyez sur <b>Enregistrer</b>. Les changements apparaissent dans le catalogue des clients après quelques instants (jusqu'à 5 minutes).</div>
+ <div id="liste"></div>
+ <h3>➕ Ajouter un produit</h3>
+ <div id="nouveau"></div>
+</main>
+<div id="msg"></div>
+<script>
+ const CLE = "__CLE__";
+ const liste = document.getElementById("liste");
+ function msg(t, ok){ const m=document.getElementById("msg"); m.textContent=t; m.style.background= ok?"#1E8E4E":"#C0392B"; m.style.display="block"; setTimeout(()=>m.style.display="none",4000); }
+
+ // Réduit la photo (max 240 px) pour qu'elle tienne dans une cellule Google Sheets
+ function reduirePhoto(fichier){
+   return new Promise((resolve,reject)=>{
+     const img=new Image(), url=URL.createObjectURL(fichier);
+     img.onload=()=>{
+       let max=240, q=0.7, data="";
+       for(let essai=0; essai<6; essai++){
+         const r=Math.min(1, max/Math.max(img.width,img.height));
+         const c=document.createElement("canvas");
+         c.width=Math.round(img.width*r); c.height=Math.round(img.height*r);
+         c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+         data=c.toDataURL("image/jpeg",q);
+         if(data.length<40000) break;
+         max=Math.round(max*0.8); q=Math.max(0.4,q-0.1);
+       }
+       URL.revokeObjectURL(url);
+       data.length<45000 ? resolve(data) : reject(new Error("Photo trop lourde"));
+     };
+     img.onerror=()=>reject(new Error("Photo illisible"));
+     img.src=url;
+   });
+ }
+
+ function carte(p, estNouveau){
+   const d=document.createElement("div"); d.className="carte";
+   let photo=p.photo||"";
+   d.innerHTML=`<div class="ligne">
+     <div class="vignette"></div>
+     <div class="champs">
+       <div class="large"><label>Nom du produit</label><input class="f-nom"></div>
+       <div><label>Prix (MRU)</label><input class="f-prix" type="number" inputmode="numeric"></div>
+       <div><label>Stock disponible</label><input class="f-stock" type="number" inputmode="numeric"></div>
+       <div><label>Unité (carton, pack...)</label><input class="f-unite"></div>
+       <div><label>Code (L, Y...)</label><input class="f-code"></div>
+     </div></div>
+     <div class="actions">
+       <label class="btnphoto">📷 Photo<input type="file" accept="image/*" class="f-photo"></label>
+       <button class="vert f-ok">💾 Enregistrer</button>
+       ${estNouveau?"":'<button class="rouge f-del">🗑 Supprimer</button>'}
+     </div>`;
+   const v=d.querySelector(".vignette");
+   function majVignette(){
+     const old=d.querySelector(".vignette"); const n=document.createElement(photo?"img":"div");
+     n.className="vignette"; if(photo) n.src=photo; else n.textContent="🥛"; old.replaceWith(n);
+   }
+   d.querySelector(".f-nom").value=p.produit||"";
+   if(!estNouveau) d.querySelector(".f-nom").readOnly=true;
+   d.querySelector(".f-prix").value=p.prix_unitaire_mru??"";
+   d.querySelector(".f-stock").value=p.stock_disponible??"";
+   d.querySelector(".f-unite").value=p.unite||"";
+   d.querySelector(".f-code").value=p.code||"";
+   majVignette();
+   d.querySelector(".f-photo").onchange=async(e)=>{
+     const f=e.target.files[0]; if(!f) return;
+     try{ photo=await reduirePhoto(f); majVignette(); msg("Photo prête. Appuyez sur Enregistrer.",true);}catch(err){msg(err.message,false);}
+   };
+   async function envoyer(action){
+     const nom=d.querySelector(".f-nom").value.trim();
+     if(!nom){msg("Écrivez le nom du produit",false);return;}
+     const corps={action, produit:nom,
+       prix_unitaire_mru:Number(d.querySelector(".f-prix").value||0),
+       stock_disponible:Number(d.querySelector(".f-stock").value||0),
+       unite:d.querySelector(".f-unite").value.trim(),
+       code:d.querySelector(".f-code").value.trim(), photo};
+     try{
+       const r=await fetch("/admin/produits/enregistrer?cle="+encodeURIComponent(CLE),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(corps)});
+       const j=await r.json();
+       msg(j.message, j.ok);
+       if(j.ok){ if(estNouveau||action==="supprimer") charger(); }
+     }catch(e){msg("Connexion impossible",false);}
+   }
+   d.querySelector(".f-ok").onclick=()=>envoyer("upsert");
+   const del=d.querySelector(".f-del");
+   if(del) del.onclick=()=>{ if(confirm("Supprimer ce produit ?")) envoyer("supprimer"); };
+   return d;
+ }
+
+ async function charger(){
+   liste.innerHTML="";
+   const r=await fetch("/catalogue"); const produits=await r.json();
+   produits.forEach(p=>liste.appendChild(carte(p,false)));
+   const n=document.getElementById("nouveau"); n.innerHTML="";
+   n.appendChild(carte({},true));
+ }
+ charger();
+</script></body></html>"""
+
+
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
 
@@ -508,6 +634,55 @@ def commander():
     print(f"[CATALOGUE] commande {id_client} total={total}")
     return jsonify({"ok": True, "total": total, "resume": resume,
                     "livraison": date_liv.strftime("%Y-%m-%d")}), 200
+
+
+@app.route("/admin/produits", methods=["GET"])
+def admin_produits():
+    """Interface de gestion : prix, stock, photos, codes des produits.
+    Accès : /admin/produits?cle=VOTRE_ADMIN_TOKEN"""
+    if request.args.get("cle") != ADMIN_TOKEN:
+        return "Accès refusé. Ajoutez ?cle=VOTRE_MOT_DE_PASSE à l'adresse.", 403
+    html = PAGE_ADMIN_PRODUITS.replace("__CLE__", json.dumps(ADMIN_TOKEN)[1:-1])
+    return html, 200
+
+
+@app.route("/admin/produits/enregistrer", methods=["POST"])
+def admin_produits_enregistrer():
+    """Reçoit une modification de produit et la transmet au Google Sheet STOCK
+    (via STOCK_WEBHOOK_URL). Les photos sont stockées dans la colonne Photo."""
+    if request.args.get("cle") != ADMIN_TOKEN:
+        return jsonify({"ok": False, "message": "Accès refusé."}), 403
+    if not STOCK_WEBHOOK_URL:
+        return jsonify({"ok": False, "message":
+            "STOCK_WEBHOOK_URL n'est pas configuré sur Render (voir le guide)."}), 200
+
+    d = request.get_json(silent=True) or {}
+    nom = (d.get("produit") or "").strip()
+    if not nom:
+        return jsonify({"ok": False, "message": "Nom du produit manquant."}), 200
+    photo = d.get("photo") or ""
+    if len(photo) > 48000:
+        return jsonify({"ok": False, "message": "Photo trop lourde, choisissez-en une autre."}), 200
+
+    envoi = {
+        "action": "supprimer" if d.get("action") == "supprimer" else "upsert",
+        "Produit": nom,
+        "Stock disponible": d.get("stock_disponible", 0),
+        "Prix unitaire (MRU)": d.get("prix_unitaire_mru", 0),
+        "Unité": d.get("unite", ""),
+        "Photo": photo,
+        "Code": d.get("code", ""),
+    }
+    try:
+        r = requests.post(STOCK_WEBHOOK_URL, json=envoi, timeout=20)
+        succes, resume = _analyser_reponse_webhook(r)
+        print(f"[STOCK] {envoi['action']} {nom} : {'OK' if succes else 'ÉCHEC ' + resume}")
+        if succes:
+            return jsonify({"ok": True, "message": "✅ Enregistré."}), 200
+        return jsonify({"ok": False, "message": "Échec Google Sheets : " + resume}), 200
+    except Exception as e:
+        print("[STOCK] ERREUR :", e)
+        return jsonify({"ok": False, "message": "Erreur : " + str(e)}), 200
 
 
 @app.route("/admin/commandes", methods=["GET"])
