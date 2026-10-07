@@ -1,23 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-AGENT WHATSAPP - DISTRIBUTION DE PRODUITS LAITIERS
-====================================================
-Ce script remplace le workflow n8n : il reçoit les messages WhatsApp,
-consulte le stock, appelle l'IA (Gemini), et répond automatiquement.
+AGENT LAITIER - COMMANDES ET QUESTIONS CLIENTS (distribution de produits laitiers)
+==================================================================================
+Serveur web Flask : catalogue à boutons (commande sans écrire), chat avec une
+IA (Groq), enregistrement dans Google Sheets, pages d'administration.
+Le canal WhatsApp (Meta) est prêt dans le code mais optionnel.
 
-STRUCTURE DU FICHIER (pour vous y retrouver) :
-  1. Configuration (vos clés, à mettre dans le fichier .env)
-  2. Lecture/écriture du stock (fichier stock.json)
-  3. Appel à l'IA Gemini
-  4. Envoi de message WhatsApp
-  5. Le "cerveau" : reçoit un message, décide quoi faire
-  6. Le serveur web qui écoute WhatsApp (Flask)
+STRUCTURE DU FICHIER :
+  1. Configuration (variables d'environnement réglées sur Render)
+  2. Lecture du stock (Google Sheets publié, sinon stock.json)
+  3. Enregistrement durable des commandes / alertes (webhooks Google Sheets)
+  4. Appel à l'IA Groq (classification + réponse en JSON strict)
+  5. Le "cerveau" : traite un message et décide quoi faire
+  6. Le serveur web : /chat, /catalogue, /commander, /webhook (WhatsApp),
+     /admin/produits, /admin/commandes, /admin/alertes, /admin/test-webhooks
 """
 
 import os
 import json
 import re
-from datetime import datetime
+import hmac
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
 import requests
 from flask import Flask, request, jsonify
@@ -55,6 +59,10 @@ ALERTES_FILE = "alertes.jsonl"       # secours local si le webhook Sheets n'est 
 COMMANDES_WEBHOOK_URL = os.environ.get("COMMANDES_WEBHOOK_URL")
 STOCK_WEBHOOK_URL = os.environ.get("STOCK_WEBHOOK_URL")  # Apps Script du Google Sheet STOCK (gestion produits/photos/prix)
 ALERTES_WEBHOOK_URL = os.environ.get("ALERTES_WEBHOOK_URL")
+# Clé secrète partagée avec les scripts Apps Script pour LIRE les Sheets Commandes/Alertes
+# (tableau de bord). Doit être identique à CLE_SECRETE dans les scripts.
+SHEETS_CLE = os.environ.get("SHEETS_CLE", "")
+SEUIL_STOCK_BAS = 20
 
 
 # ============================================================
@@ -101,7 +109,12 @@ def lire_stock():
                     prix = int(float(valeurs.get("prix unitaire (mru)", 0) or 0))
                 except ValueError:
                     prix = 0
+                try:
+                    seuil = int(float(valeurs.get("seuil alerte", "") or 0)) or None
+                except ValueError:
+                    seuil = None
                 stock.append({
+                    "seuil": seuil,
                     "produit": nom_produit,
                     "stock_disponible": stock_dispo,
                     "prix_unitaire_mru": prix,
@@ -231,7 +244,7 @@ def demander_a_ia(message_client, stock, max_essais=3):
 
     prompt = PROMPT_SYSTEME.format(
         societe=NOM_SOCIETE,
-        stock=json.dumps([{k: v for k, v in p.items() if k != "photo"} for p in stock], ensure_ascii=False),
+        stock=json.dumps([{k: v for k, v in p.items() if k not in ("photo", "seuil")} for p in stock], ensure_ascii=False),
         message=message_client,
     )
 
@@ -757,6 +770,126 @@ def tester_webhooks():
 h1{{color:#1B4D8C;font-size:18px;}}h2{{font-size:15px;margin-bottom:4px;}}
 p{{background:white;border:1px solid #E3E7EF;padding:10px;font-size:14px;line-height:1.5;}}</style>
 </head><body><h1>🔧 Test des webhooks Google Sheets</h1>{blocs}</body></html>""", 200
+
+
+# ============================================================
+# TABLEAU DE BORD (admin mobile) : /admin  +  /admin/api/dashboard
+# ============================================================
+def _admin_ok():
+    """Vérifie le mot de passe admin envoyé dans l'en-tête X-Admin-Token
+    (et non dans l'adresse, pour ne pas le laisser dans l'historique)."""
+    envoye = request.headers.get("X-Admin-Token", "")
+    return bool(ADMIN_TOKEN) and hmac.compare_digest(envoye.encode(), ADMIN_TOKEN.encode())
+
+
+def _lire_feuille(webhook_url, fichier_local):
+    """Lit les lignes d'un Google Sheet via son script Apps Script (doGet protégé
+    par SHEETS_CLE). Sans webhook, lit le fichier local de secours."""
+    if not webhook_url:
+        return {"source": "local", "lignes": lire_lignes_jsonl(fichier_local), "erreur": None}
+    try:
+        r = requests.get(webhook_url, params={"action": "lire", "cle": SHEETS_CLE}, timeout=25)
+        data = r.json()
+        if data.get("succes") is True:
+            return {"source": "sheets", "lignes": data.get("lignes", []), "erreur": None}
+        return {"source": "sheets", "lignes": [], "erreur": data.get("erreur", "Réponse inattendue")}
+    except ValueError:
+        return {"source": "sheets", "lignes": [], "erreur":
+                "Le script Apps Script doit être mis à jour (version avec lecture) et redéployé."}
+    except Exception as e:
+        return {"source": "sheets", "lignes": [], "erreur": str(e)}
+
+
+def _nombre(valeur):
+    try:
+        return float(str(valeur).replace(" ", "").replace(",", ".") or 0)
+    except ValueError:
+        return 0.0
+
+
+def _jour(valeur):
+    return str(valeur or "")[:10]
+
+
+@app.route("/admin/api/dashboard", methods=["GET"])
+def api_dashboard():
+    if not _admin_ok():
+        return jsonify({"erreur": "Accès refusé"}), 401
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_cmd = pool.submit(_lire_feuille, COMMANDES_WEBHOOK_URL, COMMANDES_FILE)
+        f_alt = pool.submit(_lire_feuille, ALERTES_WEBHOOK_URL, ALERTES_FILE)
+        cmd, alt = f_cmd.result(), f_alt.result()
+
+    commandes = sorted(cmd["lignes"], key=lambda l: str(l.get("Date", "")), reverse=True)
+    alertes = sorted(alt["lignes"], key=lambda l: str(l.get("Date", "")), reverse=True)
+
+    aujourdhui = datetime.now().date()
+    jours = [(aujourdhui - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    par_jour = {j: {"nb": 0, "total": 0.0} for j in jours}
+    for c in commandes:
+        j = _jour(c.get("Date"))
+        if j in par_jour:
+            par_jour[j]["nb"] += 1
+            par_jour[j]["total"] += _nombre(c.get("Total MRU"))
+
+    auj, hier = aujourdhui.isoformat(), (aujourdhui - timedelta(days=1)).isoformat()
+    demain = (aujourdhui + timedelta(days=1)).isoformat()
+    livraison_auj = sum(1 for c in commandes if _jour(c.get("Livraison")) == auj)
+    livraison_dem = sum(1 for c in commandes if _jour(c.get("Livraison")) == demain)
+
+    alertes_7j = [a for a in alertes if _jour(a.get("Date")) >= jours[0]]
+    categories = {}
+    for a in alertes_7j:
+        k = a.get("Categorie") or "AUTRE"
+        categories[k] = categories.get(k, 0) + 1
+
+    stock = []
+    for p in lire_stock():
+        seuil = p.get("seuil") or SEUIL_STOCK_BAS
+        niveau = "rupture" if p["stock_disponible"] <= 0 else ("bas" if p["stock_disponible"] <= seuil else "ok")
+        stock.append({"produit": p["produit"], "stock": p["stock_disponible"],
+                      "unite": p.get("unite", ""), "prix": p.get("prix_unitaire_mru", 0),
+                      "seuil": seuil, "niveau": niveau})
+    ordre = {"rupture": 0, "bas": 1, "ok": 2}
+    stock.sort(key=lambda x: (ordre[x["niveau"]], x["stock"]))
+    stock_resume = {n: sum(1 for x in stock if x["niveau"] == n) for n in ordre}
+    stock_resume["total"] = len(stock)
+
+    def court(l, champs):
+        return {k: l.get(k, "") for k in champs}
+
+    return jsonify({
+        "maintenant": datetime.now().isoformat(timespec="seconds"),
+        "sources": {
+            "commandes": {"source": cmd["source"], "erreur": cmd["erreur"]},
+            "alertes": {"source": alt["source"], "erreur": alt["erreur"]},
+        },
+        "kpi": {
+            "cmd_aujourdhui": par_jour[auj]["nb"],
+            "total_aujourdhui": par_jour[auj]["total"],
+            "total_hier": par_jour[hier]["total"],
+            "total_7j": sum(v["total"] for v in par_jour.values()),
+            "nb_7j": sum(v["nb"] for v in par_jour.values()),
+            "livraison_aujourdhui": livraison_auj,
+            "livraison_demain": livraison_dem,
+            "alertes_7j": len(alertes_7j),
+        },
+        "serie_7j": [{"jour": j, **par_jour[j]} for j in jours],
+        "alertes_par_categorie": categories,
+        "dernieres_commandes": [court(c, ["Date", "Client", "Message", "Total MRU", "Livraison"]) for c in commandes[:6]],
+        "dernieres_alertes": [court(a, ["Date", "Client", "Categorie", "Message"]) for a in alertes[:6]],
+        "stock": stock,
+        "stock_resume": stock_resume,
+    }), 200
+
+
+@app.route("/admin", methods=["GET"])
+@app.route("/admin/", methods=["GET"])
+def page_admin():
+    """Page du tableau de bord (la page elle-même est publique mais vide :
+    les données exigent le mot de passe)."""
+    return app.send_static_file("admin.html")
 
 
 @app.route("/", methods=["GET"])
