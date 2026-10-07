@@ -45,7 +45,7 @@ GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 NUMERO_RESPONSABLE = os.environ.get("NUMERO_RESPONSABLE")
 
 NOM_SOCIETE = os.environ.get("NOM_SOCIETE", "notre société")
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changez-moi")  # mot de passe pour consulter les données
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changez-moi").strip()  # mot de passe pour consulter les données
 
 STOCK_FILE = "stock.json"
 STOCK_SHEET_URL = os.environ.get("STOCK_SHEET_URL")  # lien CSV publié du Google Sheet (optionnel)
@@ -778,7 +778,7 @@ p{{background:white;border:1px solid #E3E7EF;padding:10px;font-size:14px;line-he
 def _admin_ok():
     """Vérifie le mot de passe admin envoyé dans l'en-tête X-Admin-Token
     (et non dans l'adresse, pour ne pas le laisser dans l'historique)."""
-    envoye = request.headers.get("X-Admin-Token", "")
+    envoye = request.headers.get("X-Admin-Token", "").strip()
     return bool(ADMIN_TOKEN) and hmac.compare_digest(envoye.encode(), ADMIN_TOKEN.encode())
 
 
@@ -794,8 +794,10 @@ def _lire_feuille(webhook_url, fichier_local):
             return {"source": "sheets", "lignes": data.get("lignes", []), "erreur": None}
         return {"source": "sheets", "lignes": [], "erreur": data.get("erreur", "Réponse inattendue")}
     except ValueError:
+        _, detail = _analyser_reponse_webhook(r)
         return {"source": "sheets", "lignes": [], "erreur":
-                "Le script Apps Script doit être mis à jour (version avec lecture) et redéployé."}
+                "Le script Apps Script doit être mis à jour (version avec lecture) et redéployé "
+                "en « Nouvelle version ». Détail : " + detail}
     except Exception as e:
         return {"source": "sheets", "lignes": [], "erreur": str(e)}
 
