@@ -35,13 +35,14 @@
     main > .section { display:block; }
     main > #avertissements { grid-column:1 / -1; }
     main > #s-accueil { display:contents; }
-    #bloc-kpi { grid-column:1 / -1; grid-template-columns:repeat(4,1fr); }
+    #bloc-kpi { grid-column:1 / -1; grid-template-columns:2fr 1fr 1fr; }
+    #bloc-kpi .kpi.hero { grid-column:auto; }
+    #c-todo { grid-column:1 / -1; }
     #liens { grid-column:1 / -1; }
     .carte { margin-bottom:0; }
   }
   @media (min-width: 1100px) {
     main { grid-template-columns:1fr 1fr 1fr; }
-    #bloc-kpi { grid-template-columns:repeat(4,1fr); }
     #c-stock { grid-column:span 1; }
     #c-graphe { grid-column:span 2; }
     #liens { grid-column:auto !important; grid-template-columns:1fr; align-content:start; margin-top:0 !important; }
@@ -77,6 +78,28 @@
   .niveau i.bas { background:#D98A00; } .niveau i.rupture { background:var(--rouge); }
   .badge.vert { background:#E3F4EA; color:var(--vert); }
   .resume-stock { font-size:13px; color:var(--gris); margin:-4px 0 8px; }
+  :root { --vert-txt:#176B3A; }
+  .kpi { text-align:left; font:inherit; color:inherit; width:100%; cursor:pointer; display:block; }
+  .kpi:active { background:#F0F4FA; }
+  .kpi.hero { grid-column:1 / -1; border-color:#C9DBF3; background:linear-gradient(180deg,#fff,#F3F8FF); }
+  .kpi.hero .valeur { font-size:40px; line-height:1.1; letter-spacing:-.5px; }
+  .delta { display:inline-block; font-size:13px; font-weight:700; margin-top:4px; padding:2px 8px; border-radius:999px; background:#EEF1F6; color:var(--gris); }
+  .delta.haut { background:#E3F4EA; color:var(--vert-txt); }
+  .delta.bas { background:#FBE9E7; color:var(--rouge); }
+  .squelette { color:transparent !important; background:linear-gradient(90deg,#E8EDF5,#F4F6FA,#E8EDF5); background-size:200% 100%; animation:brille 1.2s linear infinite; border-radius:8px; min-width:70px; display:inline-block; }
+  @keyframes brille { to { background-position:-200% 0; } }
+  @media (prefers-reduced-motion: reduce) { .squelette { animation:none; } }
+  .todo { display:flex; align-items:center; gap:10px; width:100%; min-height:52px; padding:8px 4px; border:none; border-top:1px solid var(--bord); background:none; text-align:left; font:inherit; color:inherit; cursor:pointer; }
+  .todo:first-of-type { border-top:none; }
+  .todo .pic { font-size:22px; width:30px; text-align:center; flex-shrink:0; }
+  .todo .txt { flex:1; font-size:14.5px; line-height:1.3; }
+  .todo .txt small { display:block; color:var(--gris); font-size:12.5px; }
+  .todo .chev { color:var(--gris); font-size:22px; }
+  .todo.ok { cursor:default; color:var(--vert-txt); font-weight:600; }
+  .bar-btn { border:none; background:none; padding:0; font:inherit; cursor:pointer; }
+  .col.choisi .barre { outline:2px solid var(--texte); outline-offset:1px; }
+  #detail-barre { font-size:13px; color:var(--gris); min-height:20px; margin-top:8px; text-align:center; }
+  .reessayer { background:none; border:1px solid currentColor; color:inherit; border-radius:8px; padding:6px 10px; margin-left:8px; font:inherit; }
   .vide { color:var(--gris); font-size:14px; padding:6px 0; }
   .alerte-source { background:#FFF1DB; color:var(--orange); border-radius:12px; padding:10px 12px; font-size:13px; margin-bottom:12px; }
   .liens { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
@@ -113,14 +136,24 @@
 
     <section class="section actif" id="s-accueil">
       <div class="grille" id="bloc-kpi">
-        <div class="kpi"><div class="label">Commandes aujourd'hui</div><div class="valeur" id="k-cmd">–</div><div class="sous" id="k-liv"></div></div>
-        <div class="kpi"><div class="label">Ventes aujourd'hui (MRU)</div><div class="valeur" id="k-tot">–</div><div class="sous" id="k-hier"></div></div>
-        <div class="kpi"><div class="label">Ventes 7 jours (MRU)</div><div class="valeur" id="k-7j">–</div><div class="sous" id="k-nb7"></div></div>
-        <div class="kpi"><div class="label">Alertes (7 jours)</div><div class="valeur" id="k-alt">–</div><div class="sous" id="k-cat"></div></div>
+        <button class="kpi hero" data-go="commandes" aria-label="Ventes aujourd'hui, ouvrir les commandes">
+          <div class="label">Ventes aujourd'hui (MRU)</div>
+          <div class="valeur" id="k-tot">–</div>
+          <div class="delta" id="k-delta"></div>
+          <div class="sous" id="k-cmd-liv"></div>
+        </button>
+        <button class="kpi" data-go="commandes">
+          <div class="label">Ventes 7 jours (MRU)</div><div class="valeur" id="k-7j">–</div><div class="sous" id="k-nb7"></div>
+        </button>
+        <button class="kpi" data-go="alertes">
+          <div class="label">Alertes (7 jours)</div><div class="valeur" id="k-alt">–</div><div class="sous" id="k-cat"></div>
+        </button>
       </div>
+      <div class="carte" id="c-todo"><h2>À traiter</h2><div id="l-todo"></div></div>
       <div class="carte" id="c-graphe">
         <h2>Ventes des 7 derniers jours (MRU)</h2>
-        <div class="barres" id="graphe" role="img" aria-label="Ventes par jour sur 7 jours"></div>
+        <div class="barres" id="graphe" role="group" aria-label="Ventes par jour sur 7 jours"></div>
+        <div id="detail-barre">Touchez une barre pour voir le détail.</div>
       </div>
       <div class="liens" id="liens" style="margin-top:12px">
         <a id="lien-produits" href="#">🛠 Gérer les produits</a>
@@ -175,6 +208,11 @@
       afficher(d);
     } catch(e) {
       $("maj").textContent = "Connexion impossible";
+      const av = $("avertissements"); av.innerHTML = "";
+      const b = el("div","alerte-source","⚠ Connexion impossible. Les chiffres affichés peuvent être anciens.");
+      const bt = el("button","reessayer","Réessayer"); bt.type = "button"; bt.onclick = charger; b.appendChild(bt);
+      av.appendChild(b);
+      document.querySelectorAll(".valeur").forEach(v => v.classList.remove("squelette"));
     } finally { $("actualiser").disabled = false; }
   }
 
@@ -189,29 +227,68 @@
     });
 
     const k = d.kpi;
-    $("k-cmd").textContent = nf.format(k.cmd_aujourdhui);
-    $("k-liv").textContent = k.livraison_aujourdhui + " à livrer auj. · " + k.livraison_demain + " demain";
-    $("k-tot").textContent = nf.format(k.total_aujourdhui);
-    $("k-hier").textContent = "Hier : " + nf.format(k.total_hier);
-    $("k-7j").textContent = nf.format(k.total_7j);
-    $("k-nb7").textContent = k.nb_7j + " commande(s)";
-    $("k-alt").textContent = nf.format(k.alertes_7j);
+    document.querySelectorAll(".valeur").forEach(v => v.classList.remove("squelette"));
+    const errC = !!d.sources.commandes.erreur, errA = !!d.sources.alertes.erreur;
+    const ou = (err, txt) => err ? "–" : txt;
+    $("k-tot").textContent = ou(errC, nf.format(k.total_aujourdhui));
+    $("k-cmd-liv").textContent = errC ? "Données indisponibles" :
+      k.cmd_aujourdhui + " commande(s) · " + k.livraison_aujourdhui + " à livrer aujourd'hui · " + k.livraison_demain + " demain";
+    // variation par rapport à hier : flèche + texte + couleur (jamais la couleur seule)
+    const dl = $("k-delta"); dl.className = "delta"; dl.hidden = errC;
+    const t = k.total_aujourdhui, y = k.total_hier;
+    if (y > 0) {
+      const p = Math.round((t - y) / y * 100);
+      dl.textContent = (p >= 0 ? "▲ +" : "▼ −") + Math.abs(p) + " % vs hier (" + nf.format(y) + ")";
+      dl.classList.add(p >= 0 ? "haut" : "bas");
+    } else if (t > 0) { dl.textContent = "▲ nouveau vs hier (0)"; dl.classList.add("haut"); }
+    else { dl.textContent = "Pas encore de vente aujourd'hui"; }
+    $("k-7j").textContent = ou(errC, nf.format(k.total_7j));
+    $("k-nb7").textContent = errC ? "" : k.nb_7j + " commande(s)";
+    $("k-alt").textContent = ou(errA, nf.format(k.alertes_7j));
     const cats = Object.entries(d.alertes_par_categorie).map(([c,n]) => (CAT[c]||[c])[0] + " " + n).join(" · ");
-    $("k-cat").textContent = cats || "Aucune alerte";
+    $("k-cat").textContent = errA ? "" : (cats || "Aucune alerte");
 
-    // graphique en barres
+    // graphique : barres tactiles (un appui affiche le détail)
     const g = $("graphe"); g.innerHTML = "";
     const max = Math.max(1, ...d.serie_7j.map(x => x.total));
     const jours = ["dim","lun","mar","mer","jeu","ven","sam"];
+    const detail = $("detail-barre");
+    const montrerDetail = (x, col) => {
+      g.querySelectorAll(".col").forEach(c => c.classList.remove("choisi"));
+      col.classList.add("choisi");
+      detail.textContent = x.jour.split("-").reverse().join("/") + " : " + nf.format(Math.round(x.total)) + " MRU · " + x.nb + " commande(s)";
+    };
     d.serie_7j.forEach((x,i) => {
-      const col = el("div","col" + (i===d.serie_7j.length-1 ? " auj":""));
+      const dernier = i === d.serie_7j.length-1;
+      const col = el("button","col bar-btn" + (dernier ? " auj":""));
+      col.type = "button";
+      col.setAttribute("aria-label", x.jour + " : " + Math.round(x.total) + " MRU, " + x.nb + " commandes");
       col.appendChild(el("div","v", x.total ? nf.format(Math.round(x.total)) : ""));
       const b = el("div","barre"); b.style.height = Math.round(x.total/max*100) + "%";
-      b.title = x.jour + " : " + nf.format(x.total) + " MRU (" + x.nb + " cmd)";
       col.appendChild(b);
       col.appendChild(el("div","j", jours[new Date(x.jour+"T12:00:00").getDay()]));
+      col.onclick = () => montrerDetail(x, col);
       g.appendChild(col);
+      if (dernier) montrerDetail(x, col);
     });
+
+    // À traiter : ce qui demande une action, en premier
+    const lt = $("l-todo"); lt.innerHTML = "";
+    const ligneTodo = (pic, titre, sous, ou_) => {
+      const b = el("button","todo"); b.type = "button";
+      b.appendChild(el("span","pic",pic));
+      const tx = el("span","txt",titre); if (sous) tx.appendChild(el("small","",sous));
+      b.appendChild(tx); b.appendChild(el("span","chev","›"));
+      b.onclick = () => montrer(ou_); lt.appendChild(b);
+    };
+    const st = d.stock_resume;
+    if (st.rupture > 0) ligneTodo("⛔", st.rupture + " produit(s) en rupture", d.stock.filter(p => p.niveau==="rupture").map(p => p.produit).join(", "), "stock");
+    if (st.bas > 0) ligneTodo("⚠️", st.bas + " produit(s) en stock bas", d.stock.filter(p => p.niveau==="bas").map(p => p.produit).join(", "), "stock");
+    const rec = d.alertes_par_categorie.RECLAMATION || 0, cre = d.alertes_par_categorie.CREDIT_PAIEMENT || 0;
+    if (rec > 0) ligneTodo("💬", rec + " réclamation(s) à traiter", "7 derniers jours", "alertes");
+    if (cre > 0) ligneTodo("💳", cre + " demande(s) de crédit / paiement", "7 derniers jours", "alertes");
+    if (!errC && k.livraison_aujourdhui > 0) ligneTodo("🚚", k.livraison_aujourdhui + " livraison(s) prévue(s) aujourd'hui", "", "commandes");
+    if (!lt.children.length) { const o = el("div","todo ok"); o.appendChild(el("span","pic","✅")); o.appendChild(el("span","txt","Rien d'urgent pour le moment.")); lt.appendChild(o); }
 
     // listes
     const lc = $("l-cmd"); lc.innerHTML = "";
@@ -269,8 +346,11 @@
   }
   document.querySelectorAll("#onglets-bas button").forEach(b => b.onclick = () => montrer(b.dataset.s));
 
+  document.querySelectorAll("[data-go]").forEach(b => b.onclick = () => montrer(b.dataset.go));
+
   function ouvrir(){
     $("connexion").hidden = true; $("tableau").hidden = false;
+    document.querySelectorAll(".valeur").forEach(v => v.classList.add("squelette"));
     charger();
     clearInterval(minuteur);
     minuteur = setInterval(() => { if (!document.hidden) charger(); }, 60000);
