@@ -108,6 +108,9 @@
   /* connexion */
   #connexion { max-width:360px; margin:12vh auto 0; padding:0 16px; }
   #connexion .carte { padding:20px; }
+  .champ-mdp { position:relative; }
+  #connexion .champ-mdp input { padding-right:56px; }
+  #connexion #voir { position:absolute; right:4px; top:14px; width:46px; height:46px; margin:0; background:none; color:var(--gris); font-size:20px; }
   #connexion input { width:100%; padding:13px; border:1px solid #D7DCE5; border-radius:10px; font-size:16px; margin:10px 0; }
   #connexion button { width:100%; padding:14px; border:none; border-radius:12px; background:var(--bleu); color:#fff; font-size:16px; font-weight:600; }
   #erreur { color:var(--rouge); font-size:14px; min-height:20px; }
@@ -120,7 +123,10 @@
   <div class="carte">
     <h2 style="font-size:19px">🔒 Espace gestion</h2>
     <div style="color:var(--gris);font-size:14px">Entrez le mot de passe administrateur.</div>
-    <input id="mdp" type="password" placeholder="Mot de passe" autocomplete="current-password">
+    <div class="champ-mdp">
+      <input id="mdp" type="password" placeholder="Mot de passe" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go">
+      <button id="voir" type="button" aria-label="Afficher le mot de passe">👁</button>
+    </div>
     <div id="erreur"></div>
     <button id="entrer">Entrer</button>
   </div>
@@ -199,21 +205,39 @@
   function el(tag, classe, texte){ const e=document.createElement(tag); if(classe) e.className=classe; if(texte!==undefined) e.textContent=texte; return e; }
   function heure(iso){ return (iso||"").replace("T"," ").slice(5,16); }
 
+  // Explique clairement pourquoi les données n'arrivent pas
+  function diagnostic(statut){
+    if (statut === 404) return "Le serveur ne connaît pas encore le tableau de bord. Mettez à jour agent_laitier.py sur GitHub (dernière version), puis attendez « Your service is live » sur Render.";
+    if (statut === 502 || statut === 503 || statut === 504) return "Le serveur démarre ou redéploie (plan gratuit en veille). Réessayez dans une minute.";
+    if (statut === 500) return "Erreur du serveur. Regardez les Logs sur Render.";
+    return "Réponse inattendue du serveur (code " + statut + ").";
+  }
+  function bandeau(texte){
+    const av = $("avertissements"); av.innerHTML = "";
+    const b = el("div","alerte-source","⚠ " + texte);
+    const bt = el("button","reessayer","Réessayer"); bt.type = "button"; bt.onclick = charger; b.appendChild(bt);
+    av.appendChild(b);
+    document.querySelectorAll(".valeur").forEach(v => v.classList.remove("squelette"));
+  }
+  // Interroge le serveur ; renvoie {ok, statut, donnees, message}
+  async function demander(){
+    let r;
+    try { r = await fetch("/admin/api/dashboard", { headers: { "X-Admin-Token": jeton }, cache:"no-store" }); }
+    catch(e) { return { ok:false, statut:0, message:"Pas de connexion internet ou serveur injoignable." }; }
+    if (r.status === 401) return { ok:false, statut:401, message:"Mot de passe incorrect." };
+    if (!r.ok) return { ok:false, statut:r.status, message:diagnostic(r.status) };
+    try { return { ok:true, statut:200, donnees: await r.json() }; }
+    catch(e) { return { ok:false, statut:200, message:"Réponse illisible du serveur (mauvaise version de agent_laitier.py ?)." }; }
+  }
+
   async function charger(){
     $("actualiser").disabled = true;
-    try {
-      const r = await fetch("/admin/api/dashboard", { headers: { "X-Admin-Token": jeton }, cache:"no-store" });
-      if (r.status === 401) { deconnecter("Mot de passe incorrect."); return; }
-      const d = await r.json();
-      afficher(d);
-    } catch(e) {
-      $("maj").textContent = "Connexion impossible";
-      const av = $("avertissements"); av.innerHTML = "";
-      const b = el("div","alerte-source","⚠ Connexion impossible. Les chiffres affichés peuvent être anciens.");
-      const bt = el("button","reessayer","Réessayer"); bt.type = "button"; bt.onclick = charger; b.appendChild(bt);
-      av.appendChild(b);
-      document.querySelectorAll(".valeur").forEach(v => v.classList.remove("squelette"));
-    } finally { $("actualiser").disabled = false; }
+    const res = await demander();
+    $("actualiser").disabled = false;
+    if (res.statut === 401) { deconnecter(res.message); return; }
+    if (!res.ok) { $("maj").textContent = "Données indisponibles"; bandeau(res.message); return; }
+    try { afficher(res.donnees); }
+    catch(e) { $("maj").textContent = "Erreur d'affichage"; bandeau("Erreur d'affichage : " + e.message); }
   }
 
   function afficher(d){
@@ -361,14 +385,18 @@
     $("erreur").textContent = msg || "";
   }
   async function entrer(){
-    const mdp = $("mdp").value;
+    const mdp = $("mdp").value.trim();
     if (!mdp) return;
     jeton = mdp; $("erreur").textContent = "";
-    const r = await fetch("/admin/api/dashboard", { headers: { "X-Admin-Token": jeton } }).catch(() => null);
-    if (!r) { $("erreur").textContent = "Connexion impossible."; return; }
-    if (r.status === 401) { $("erreur").textContent = "Mot de passe incorrect."; jeton = ""; return; }
+    const res = await demander();
+    if (!res.ok) {
+      $("erreur").textContent = res.message;
+      if (res.statut === 401) jeton = "";
+      return;
+    }
     ecrire("admin_jeton", jeton); $("mdp").value = ""; ouvrir();
   }
+  $("voir").onclick = () => { const m = $("mdp"); const cache = m.type === "password"; m.type = cache ? "text" : "password"; $("voir").textContent = cache ? "🙈" : "👁"; };
   $("entrer").onclick = entrer;
   $("mdp").addEventListener("keydown", e => { if (e.key === "Enter") entrer(); });
   $("actualiser").onclick = charger;
