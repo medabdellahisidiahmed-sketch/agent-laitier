@@ -263,6 +263,7 @@ def ajouter_ligne_arriere_plan(fichier, donnees, webhook_url=None):
     def tache():
         try:
             ajouter_ligne(fichier, donnees, webhook_url=webhook_url)
+            _cache_feuilles.clear()  # le tableau de bord doit voir la nouvelle ligne
         except Exception as e:
             print("[SHEETS] ERREUR arrière-plan :", e)
     _pool_ecriture.submit(tache)
@@ -906,7 +907,24 @@ def _admin_ok():
     return bool(ADMIN_TOKEN) and hmac.compare_digest(envoye.encode(), ADMIN_TOKEN.encode())
 
 
+CACHE_FEUILLES_SECONDES = 20
+_cache_feuilles = {}  # (webhook, fichier) -> (heure, résultat)
+
+
 def _lire_feuille(webhook_url, fichier_local):
+    """Version avec petite mémoire (20 s) : ouvrir le tableau de bord plusieurs
+    fois de suite n'attend plus Google. Une erreur n'est jamais mise en mémoire."""
+    cle = (webhook_url, fichier_local)
+    trouve = _cache_feuilles.get(cle)
+    if trouve and time.time() - trouve[0] < CACHE_FEUILLES_SECONDES:
+        return trouve[1]
+    resultat = _lire_feuille_brut(webhook_url, fichier_local)
+    if not resultat["erreur"]:
+        _cache_feuilles[cle] = (time.time(), resultat)
+    return resultat
+
+
+def _lire_feuille_brut(webhook_url, fichier_local):
     """Lit les lignes d'un Google Sheet via son script Apps Script (doGet protégé
     par SHEETS_CLE). Sans webhook, lit le fichier local de secours."""
     if not webhook_url:
@@ -944,6 +962,7 @@ def api_dashboard():
 
     if request.args.get("frais"):
         vider_cache_stock()  # bouton « Actualiser » : relire aussi le stock
+        _cache_feuilles.clear()
     with ThreadPoolExecutor(max_workers=3) as pool:
         f_cmd = pool.submit(_lire_feuille, COMMANDES_WEBHOOK_URL, COMMANDES_FILE)
         f_alt = pool.submit(_lire_feuille, ALERTES_WEBHOOK_URL, ALERTES_FILE)
