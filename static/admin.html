@@ -200,6 +200,7 @@
   const nf = new Intl.NumberFormat("fr-FR");
   let jeton = "";
   let minuteur = null;
+  let tentatives = 0;
 
   function lire(k){ try { return localStorage.getItem(k) || ""; } catch(e){ return ""; } }
   function ecrire(k,v){ try { v ? localStorage.setItem(k,v) : localStorage.removeItem(k); } catch(e){} }
@@ -238,7 +239,14 @@
     $("actualiser").disabled = false;
     if (res.statut === 401) { deconnecter(res.message); return; }
     if (!res.ok) { $("maj").textContent = "Données indisponibles"; bandeau(res.message); return; }
-    try { afficher(res.donnees); ecrire("admin_cache", JSON.stringify(res.donnees)); }
+    try {
+      afficher(res.donnees);
+      const so = res.donnees.sources;
+      if (so.commandes.chargement || so.alertes.chargement) {
+        // Google met du temps : on ne garde pas ces données incomplètes, et on réessaie
+        if (tentatives++ < 12) setTimeout(charger, 4000);
+      } else { tentatives = 0; ecrire("admin_cache", JSON.stringify(res.donnees)); }
+    }
     catch(e) { $("maj").textContent = "Erreur d'affichage"; bandeau("Erreur d'affichage : " + e.message); }
   }
 
@@ -248,13 +256,17 @@
     const av = $("avertissements"); av.innerHTML = "";
     ["commandes","alertes"].forEach(n => {
       const s = d.sources[n];
-      if (s.erreur) av.appendChild(el("div","alerte-source","⚠ " + (n==="commandes"?"Commandes":"Alertes") + " : " + s.erreur));
+      const nom = n==="commandes" ? "Commandes" : "Alertes";
+      if (s.chargement) av.appendChild(el("div","alerte-source","⏳ " + nom + " : Google répond lentement, chargement en cours…"));
+      else if (s.avertissement) av.appendChild(el("div","alerte-source","ℹ " + nom + " : données gardées en mémoire (il y a " + (s.age||0) + " s), Google n'a pas répondu à la dernière mise à jour."));
+      if (s.chargement) {}
+      else if (s.erreur) av.appendChild(el("div","alerte-source","⚠ " + (n==="commandes"?"Commandes":"Alertes") + " : " + s.erreur));
       else if (s.source === "local") av.appendChild(el("div","alerte-source","ℹ " + (n==="commandes"?"Commandes":"Alertes") + " : lien Google Sheets non configuré, données de secours (temporaires)."));
     });
 
     const k = d.kpi;
     document.querySelectorAll(".valeur").forEach(v => v.classList.remove("squelette"));
-    const errC = !!d.sources.commandes.erreur, errA = !!d.sources.alertes.erreur;
+    const errC = !!(d.sources.commandes.erreur || d.sources.commandes.chargement), errA = !!(d.sources.alertes.erreur || d.sources.alertes.chargement);
     const ou = (err, txt) => err ? "–" : txt;
     $("k-tot").textContent = ou(errC, nf.format(k.total_aujourdhui));
     $("k-cmd-liv").textContent = errC ? "Données indisponibles" :
