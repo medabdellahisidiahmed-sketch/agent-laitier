@@ -20,6 +20,7 @@ import os
 import json
 import re
 import hmac
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
@@ -77,7 +78,27 @@ def _normaliser_cle(cle):
     return cle
 
 
+CACHE_STOCK_SECONDES = 30
+_cache_stock = {"t": 0.0, "v": None}
+
+
 def lire_stock():
+    """Stock avec petite mémoire (30 s) : le catalogue et l'IA n'attendent plus
+    Google Sheets à chaque appel. Les modifications faites depuis la page de
+    gestion des produits vident cette mémoire immédiatement."""
+    maintenant = time.time()
+    if _cache_stock["v"] is not None and maintenant - _cache_stock["t"] < CACHE_STOCK_SECONDES:
+        return _cache_stock["v"]
+    valeur = _lire_stock_brut()
+    _cache_stock["v"], _cache_stock["t"] = valeur, maintenant
+    return valeur
+
+
+def vider_cache_stock():
+    _cache_stock["v"] = None
+
+
+def _lire_stock_brut():
     """Lit le stock depuis le Google Sheets publié (si STOCK_SHEET_URL est
     configuré), sinon depuis le fichier local stock.json en secours.
     Le Google Sheets est relu à CHAQUE message : toute modification faite
@@ -160,6 +181,21 @@ def ajouter_ligne(fichier, donnees, webhook_url=None):
     # Secours local (ou comportement par défaut si aucun webhook configuré)
     with open(fichier, "a", encoding="utf-8") as f:
         f.write(json.dumps(donnees, ensure_ascii=False) + "\n")
+
+
+_pool_ecriture = ThreadPoolExecutor(max_workers=4)
+
+
+def ajouter_ligne_arriere_plan(fichier, donnees, webhook_url=None):
+    """Enregistre la ligne dans Google Sheets SANS faire attendre le client :
+    la réponse part tout de suite, l'écriture se termine en arrière-plan
+    (avec le même secours local en cas d'échec)."""
+    def tache():
+        try:
+            ajouter_ligne(fichier, donnees, webhook_url=webhook_url)
+        except Exception as e:
+            print("[SHEETS] ERREUR arrière-plan :", e)
+    _pool_ecriture.submit(tache)
 
 
 def _analyser_reponse_webhook(reponse):
@@ -332,14 +368,14 @@ def generer_reponse(identifiant_client, texte_client):
           f"commande_structuree={'oui' if commande else 'NON (rien à enregistrer)'}")
 
     if escalade:
-        ajouter_ligne(ALERTES_FILE, {
+        ajouter_ligne_arriere_plan(ALERTES_FILE, {
             "Client": identifiant_client,
             "Categorie": categorie,
             "Message": texte_client,
             "Reponse": reponse_client,
         }, webhook_url=ALERTES_WEBHOOK_URL)
     elif commande:
-        ajouter_ligne(COMMANDES_FILE, {
+        ajouter_ligne_arriere_plan(COMMANDES_FILE, {
             "Client": identifiant_client,
             "Message": texte_client,
             "Total MRU": commande.get("total_commande_mru", ""),
@@ -638,7 +674,7 @@ def commander():
         return jsonify({"ok": False, "message": "Aucun produit choisi."}), 200
 
     date_liv = datetime.now() + timedelta(days=0 if jour == "aujourdhui" else 1)
-    ajouter_ligne(COMMANDES_FILE, {
+    ajouter_ligne_arriere_plan(COMMANDES_FILE, {
         "Client": id_client,
         "Message": "Catalogue : " + " ; ".join(resume),
         "Total MRU": total,
@@ -691,6 +727,7 @@ def admin_produits_enregistrer():
         succes, resume = _analyser_reponse_webhook(r)
         print(f"[STOCK] {envoi['action']} {nom} : {'OK' if succes else 'ÉCHEC ' + resume}")
         if succes:
+            vider_cache_stock()
             return jsonify({"ok": True, "message": "✅ Enregistré."}), 200
         return jsonify({"ok": False, "message": "Échec Google Sheets : " + resume}), 200
     except Exception as e:
@@ -818,10 +855,13 @@ def api_dashboard():
     if not _admin_ok():
         return jsonify({"erreur": "Accès refusé"}), 401
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    if request.args.get("frais"):
+        vider_cache_stock()  # bouton « Actualiser » : relire aussi le stock
+    with ThreadPoolExecutor(max_workers=3) as pool:
         f_cmd = pool.submit(_lire_feuille, COMMANDES_WEBHOOK_URL, COMMANDES_FILE)
         f_alt = pool.submit(_lire_feuille, ALERTES_WEBHOOK_URL, ALERTES_FILE)
-        cmd, alt = f_cmd.result(), f_alt.result()
+        f_stk = pool.submit(lire_stock)
+        cmd, alt, stock_brut = f_cmd.result(), f_alt.result(), f_stk.result()
 
     commandes = sorted(cmd["lignes"], key=lambda l: str(l.get("Date", "")), reverse=True)
     alertes = sorted(alt["lignes"], key=lambda l: str(l.get("Date", "")), reverse=True)
@@ -847,7 +887,7 @@ def api_dashboard():
         categories[k] = categories.get(k, 0) + 1
 
     stock = []
-    for p in lire_stock():
+    for p in stock_brut:
         seuil = p.get("seuil") or SEUIL_STOCK_BAS
         niveau = "rupture" if p["stock_disponible"] <= 0 else ("bas" if p["stock_disponible"] <= seuil else "ok")
         stock.append({"produit": p["produit"], "stock": p["stock_disponible"],
