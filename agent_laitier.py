@@ -89,7 +89,7 @@ def lire_stock():
     maintenant = time.time()
     if _cache_stock["v"] is not None and maintenant - _cache_stock["t"] < CACHE_STOCK_SECONDES:
         return _cache_stock["v"]
-    valeur = _lire_stock_brut()
+    valeur = _appliquer_modifs_recentes(_lire_stock_brut())
     _cache_stock["v"], _cache_stock["t"] = valeur, maintenant
     return valeur
 
@@ -98,11 +98,81 @@ def vider_cache_stock():
     _cache_stock["v"] = None
 
 
+# Le CSV publié par Google met jusqu'à ~5 minutes à se mettre à jour. Pour qu'un
+# produit ajouté/modifié/supprimé apparaisse tout de suite chez les clients, on
+# garde en mémoire les modifications des 10 dernières minutes et on les applique
+# par-dessus ce que renvoie Google.
+DUREE_MODIFS_SECONDES = 600
+_modifs_recentes = {}  # nom en minuscules -> (heure, produit dict ou None si supprimé)
+
+
+def noter_modif_produit(nom, produit):
+    _modifs_recentes[nom.strip().lower()] = (time.time(), produit)
+
+
+def _appliquer_modifs_recentes(stock):
+    maintenant = time.time()
+    for cle in [k for k, (t, _) in _modifs_recentes.items() if maintenant - t > DUREE_MODIFS_SECONDES]:
+        del _modifs_recentes[cle]
+    if not _modifs_recentes:
+        return stock
+    resultat = list(stock)
+    for cle, (_, produit) in _modifs_recentes.items():
+        index = next((i for i, p in enumerate(resultat) if p["produit"].strip().lower() == cle), None)
+        if produit is None:
+            if index is not None:
+                resultat.pop(index)
+        elif index is None:
+            resultat.append(produit)
+        else:
+            ancien = resultat[index]
+            resultat[index] = {**ancien, **{k: v for k, v in produit.items() if k != "photo" or v}}
+    return resultat
+
+
+def _lire_stock_via_script():
+    """Lecture directe du Sheet Stock via Apps Script (instantanée, sans le
+    retard du CSV publié). Renvoie None si le script n'a pas la lecture."""
+    if not (STOCK_WEBHOOK_URL and SHEETS_CLE):
+        return None
+    try:
+        r = requests.get(STOCK_WEBHOOK_URL, params={"action": "lire", "cle": SHEETS_CLE}, timeout=15)
+        data = r.json()
+        if data.get("succes") is not True:
+            return None
+        stock = []
+        for ligne in data.get("lignes", []):
+            valeurs = {_normaliser_cle(k): v for k, v in ligne.items() if k}
+            nom = str(valeurs.get("produit", "")).strip()
+            if not nom:
+                continue
+            def entier(cle):
+                try:
+                    return int(float(str(valeurs.get(cle, 0)).replace(",", ".") or 0))
+                except ValueError:
+                    return 0
+            stock.append({
+                "seuil": entier("seuil alerte") or None,
+                "produit": nom,
+                "stock_disponible": entier("stock disponible"),
+                "prix_unitaire_mru": entier("prix unitaire (mru)"),
+                "unite": str(valeurs.get("unite", "")).strip(),
+                "photo": str(valeurs.get("photo", "")).strip(),
+                "code": str(valeurs.get("code", "")).strip(),
+            })
+        return stock
+    except Exception:
+        return None  # script pas encore mis à jour : on utilisera le CSV
+
+
 def _lire_stock_brut():
     """Lit le stock depuis le Google Sheets publié (si STOCK_SHEET_URL est
     configuré), sinon depuis le fichier local stock.json en secours.
     Le Google Sheets est relu à CHAQUE message : toute modification faite
     par la société est donc prise en compte immédiatement, sans redéploiement."""
+    direct = _lire_stock_via_script()
+    if direct:
+        return direct
     if STOCK_SHEET_URL:
         try:
             import csv
@@ -460,7 +530,9 @@ PAGE_ADMIN_PRODUITS = """<!DOCTYPE html>
 <title>Gestion des produits</title>
 <style>
  body{font-family:-apple-system,"Segoe UI",Arial,sans-serif;background:#F4F6FA;margin:0;color:#1E2430}
- header{background:#1B4D8C;color:#fff;padding:14px 16px;font-size:17px;font-weight:600}
+ header{background:#1B4D8C;color:#fff;padding:10px 12px;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;top:0;z-index:5}
+ header span{flex:1;text-align:center}
+ .retour{color:#fff;text-decoration:none;background:rgba(255,255,255,.18);padding:8px 10px;border-radius:9px;font-size:13px;white-space:nowrap}
  main{max-width:760px;margin:0 auto;padding:12px}
  .carte{background:#fff;border:1px solid #E3E7EF;border-radius:14px;padding:12px;margin-bottom:12px}
  .ligne{display:flex;gap:12px;align-items:flex-start}
@@ -477,9 +549,9 @@ PAGE_ADMIN_PRODUITS = """<!DOCTYPE html>
  #msg{position:fixed;left:12px;right:12px;bottom:12px;padding:12px;border-radius:10px;color:#fff;display:none;text-align:center;z-index:9}
  .info{font-size:13px;color:#5B6B86;background:#E8F0FB;border-radius:10px;padding:10px;margin-bottom:12px}
 </style></head><body>
-<header>🛠 Gestion des produits</header>
+<header><a href="/admin" class="retour">← Tableau de bord</a><span>🛠 Gestion des produits</span><a href="/" class="retour" target="_blank">👁 Appli client</a></header>
 <main>
- <div class="info">Modifiez le prix, le stock ou la photo d'un produit puis appuyez sur <b>Enregistrer</b>. Les changements apparaissent dans le catalogue des clients après quelques instants (jusqu'à 5 minutes).</div>
+ <div class="info">Modifiez le prix, le stock ou la photo d'un produit puis appuyez sur <b>Enregistrer</b>. Les changements sont visibles tout de suite dans l'appli des clients.</div>
  <div id="liste"></div>
  <h3>➕ Ajouter un produit</h3>
  <div id="nouveau"></div>
@@ -727,8 +799,23 @@ def admin_produits_enregistrer():
         succes, resume = _analyser_reponse_webhook(r)
         print(f"[STOCK] {envoi['action']} {nom} : {'OK' if succes else 'ÉCHEC ' + resume}")
         if succes:
+            if envoi["action"] == "supprimer":
+                noter_modif_produit(nom, None)
+            else:
+                def _entier(v):
+                    try:
+                        return int(float(v or 0))
+                    except (TypeError, ValueError):
+                        return 0
+                noter_modif_produit(nom, {
+                    "produit": nom, "seuil": None,
+                    "stock_disponible": _entier(envoi["Stock disponible"]),
+                    "prix_unitaire_mru": _entier(envoi["Prix unitaire (MRU)"]),
+                    "unite": str(envoi["Unité"]).strip(), "photo": photo,
+                    "code": str(envoi["Code"]).strip(),
+                })
             vider_cache_stock()
-            return jsonify({"ok": True, "message": "✅ Enregistré."}), 200
+            return jsonify({"ok": True, "message": "✅ Enregistré. Visible tout de suite dans l'appli des clients."}), 200
         return jsonify({"ok": False, "message": "Échec Google Sheets : " + resume}), 200
     except Exception as e:
         print("[STOCK] ERREUR :", e)
