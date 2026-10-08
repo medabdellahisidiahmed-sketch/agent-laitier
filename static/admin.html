@@ -115,6 +115,8 @@
   #connexion button { width:100%; padding:14px; border:none; border-radius:12px; background:var(--bleu); color:#fff; font-size:16px; font-weight:600; }
   #erreur { color:var(--rouge); font-size:14px; min-height:20px; }
   [hidden] { display:none !important; }
+  @keyframes flash { 0%,60% { box-shadow:0 0 0 3px var(--bleu); } 100% { box-shadow:0 0 0 0 transparent; } }
+  .flash { animation:flash 1.6s ease-out; }
 </style>
 </head>
 <body>
@@ -236,7 +238,7 @@
     $("actualiser").disabled = false;
     if (res.statut === 401) { deconnecter(res.message); return; }
     if (!res.ok) { $("maj").textContent = "Données indisponibles"; bandeau(res.message); return; }
-    try { afficher(res.donnees); }
+    try { afficher(res.donnees); ecrire("admin_cache", JSON.stringify(res.donnees)); }
     catch(e) { $("maj").textContent = "Erreur d'affichage"; bandeau("Erreur d'affichage : " + e.message); }
   }
 
@@ -364,6 +366,15 @@
   }
 
   function montrer(nom){
+    // Grand écran : tout est déjà affiché, on fait défiler jusqu'au bloc et on le met en évidence
+    if (window.matchMedia("(min-width: 760px)").matches) {
+      const cible = nom === "stock" ? $("c-stock") : $("s-" + nom).querySelector(".carte");
+      if (cible) {
+        cible.scrollIntoView({ behavior:"smooth", block:"center" });
+        cible.classList.remove("flash"); void cible.offsetWidth; cible.classList.add("flash");
+      }
+      return;
+    }
     document.querySelectorAll(".section").forEach(s => s.classList.toggle("actif", s.id === "s-" + nom));
     document.querySelectorAll("#onglets-bas button").forEach(b => b.classList.toggle("actif", b.dataset.s === nom));
     window.scrollTo(0, 0);
@@ -372,15 +383,24 @@
 
   document.querySelectorAll("[data-go]").forEach(b => b.onclick = () => montrer(b.dataset.go));
 
-  function ouvrir(){
+  function ouvrir(donnees){
     $("connexion").hidden = true; $("tableau").hidden = false;
-    document.querySelectorAll(".valeur").forEach(v => v.classList.add("squelette"));
-    charger();
+    let ancien = null;
+    if (!donnees) { try { ancien = JSON.parse(lire("admin_cache") || "null"); } catch(e) {} }
+    if (donnees) { try { afficher(donnees); ecrire("admin_cache", JSON.stringify(donnees)); } catch(e) { charger(); } }
+    else if (ancien) {
+      // Affichage immédiat des dernières données connues, puis mise à jour
+      try { afficher(ancien); $("maj").textContent = "Dernières données (" + (ancien.maintenant||"").slice(11,16) + ") · actualisation…"; } catch(e) { ancien = null; }
+    }
+    if (!donnees) {
+      if (!ancien) document.querySelectorAll(".valeur").forEach(v => v.classList.add("squelette"));
+      charger();
+    }
     clearInterval(minuteur);
     minuteur = setInterval(() => { if (!document.hidden) charger(); }, 60000);
   }
   function deconnecter(msg){
-    clearInterval(minuteur); ecrire("admin_jeton","");
+    clearInterval(minuteur); ecrire("admin_jeton",""); ecrire("admin_cache","");
     jeton = ""; $("tableau").hidden = true; $("connexion").hidden = false;
     $("erreur").textContent = msg || "";
   }
@@ -394,7 +414,7 @@
       if (res.statut === 401) jeton = "";
       return;
     }
-    ecrire("admin_jeton", jeton); $("mdp").value = ""; ouvrir();
+    ecrire("admin_jeton", jeton); $("mdp").value = ""; ouvrir(res.donnees);
   }
   $("voir").onclick = () => { const m = $("mdp"); const cache = m.type === "password"; m.type = cache ? "text" : "password"; $("voir").textContent = cache ? "🙈" : "👁"; };
   $("entrer").onclick = entrer;
