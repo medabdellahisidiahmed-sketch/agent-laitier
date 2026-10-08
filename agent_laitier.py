@@ -21,6 +21,7 @@ import json
 import re
 import hmac
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
@@ -263,7 +264,7 @@ def ajouter_ligne_arriere_plan(fichier, donnees, webhook_url=None):
     def tache():
         try:
             ajouter_ligne(fichier, donnees, webhook_url=webhook_url)
-            _cache_feuilles.clear()  # le tableau de bord doit voir la nouvelle ligne
+            lancer_rafraichissement(webhook_url, fichier)  # le tableau de bord verra la nouvelle ligne
         except Exception as e:
             print("[SHEETS] ERREUR arrière-plan :", e)
     _pool_ecriture.submit(tache)
@@ -908,20 +909,74 @@ def _admin_ok():
 
 
 CACHE_FEUILLES_SECONDES = 20
-_cache_feuilles = {}  # (webhook, fichier) -> (heure, résultat)
+_pool_lecture = ThreadPoolExecutor(max_workers=4)
+_cache_feuilles = {}    # (webhook, fichier) -> {"t": heure, "v": dernier résultat réussi}
+_erreur_feuilles = {}   # (webhook, fichier) -> dernier message d'erreur (ou absent si tout va bien)
+_lectures_en_cours = {}  # (webhook, fichier) -> Future
+_verrou_lectures = threading.Lock()
 
 
-def _lire_feuille(webhook_url, fichier_local):
-    """Version avec petite mémoire (20 s) : ouvrir le tableau de bord plusieurs
-    fois de suite n'attend plus Google. Une erreur n'est jamais mise en mémoire."""
-    cle = (webhook_url, fichier_local)
-    trouve = _cache_feuilles.get(cle)
-    if trouve and time.time() - trouve[0] < CACHE_FEUILLES_SECONDES:
-        return trouve[1]
-    resultat = _lire_feuille_brut(webhook_url, fichier_local)
-    if not resultat["erreur"]:
-        _cache_feuilles[cle] = (time.time(), resultat)
+def _rafraichir_feuille(cle, webhook_url, fichier_local):
+    """Lit Google (jusqu'à 2 essais). Garde toujours le dernier résultat réussi."""
+    resultat = None
+    for _ in range(2):
+        resultat = _lire_feuille_brut(webhook_url, fichier_local)
+        if not resultat["erreur"]:
+            break
+    if resultat["erreur"]:
+        _erreur_feuilles[cle] = resultat["erreur"]
+        print("[SHEETS] lecture échouée :", resultat["erreur"][:200])
+    else:
+        _erreur_feuilles.pop(cle, None)
+        _cache_feuilles[cle] = {"t": time.time(), "v": resultat}
+    with _verrou_lectures:
+        _lectures_en_cours.pop(cle, None)
     return resultat
+
+
+def lancer_rafraichissement(webhook_url, fichier_local):
+    """Démarre (une seule fois à la fois) la lecture de Google en arrière-plan."""
+    if not webhook_url:
+        return None
+    cle = (webhook_url, fichier_local)
+    with _verrou_lectures:
+        futur = _lectures_en_cours.get(cle)
+        if futur is None:
+            futur = _pool_lecture.submit(_rafraichir_feuille, cle, webhook_url, fichier_local)
+            _lectures_en_cours[cle] = futur
+    return futur
+
+
+def _lire_feuille(webhook_url, fichier_local, forcer=False):
+    """Ne fait JAMAIS attendre longtemps le tableau de bord :
+    - données connues en mémoire -> renvoyées tout de suite (et relues en
+      arrière-plan si elles ont plus de 20 s) ;
+    - rien en mémoire (serveur qui vient de se réveiller) -> on attend au plus
+      8 s, sinon on répond « chargement » et la page réessaie toute seule ;
+    - Google en erreur -> on garde les dernières données avec un avertissement."""
+    if not webhook_url:
+        return _lire_feuille_brut(webhook_url, fichier_local)
+    cle = (webhook_url, fichier_local)
+    entree = _cache_feuilles.get(cle)
+    age = time.time() - entree["t"] if entree else None
+
+    if entree and not forcer:
+        if age > CACHE_FEUILLES_SECONDES:
+            lancer_rafraichissement(webhook_url, fichier_local)
+        return {**entree["v"], "age": int(age), "avertissement": _erreur_feuilles.get(cle)}
+
+    futur = lancer_rafraichissement(webhook_url, fichier_local)
+    try:
+        futur.result(timeout=20 if forcer else 8)
+    except Exception:
+        pass
+    entree = _cache_feuilles.get(cle)
+    if entree:
+        age = int(time.time() - entree["t"])
+        return {**entree["v"], "age": age, "avertissement": _erreur_feuilles.get(cle) if age > 5 else None}
+    if cle in _erreur_feuilles:
+        return {"source": "sheets", "lignes": [], "erreur": _erreur_feuilles[cle]}
+    return {"source": "sheets", "lignes": [], "erreur": None, "chargement": True}
 
 
 def _lire_feuille_brut(webhook_url, fichier_local):
@@ -962,10 +1017,10 @@ def api_dashboard():
 
     if request.args.get("frais"):
         vider_cache_stock()  # bouton « Actualiser » : relire aussi le stock
-        _cache_feuilles.clear()
+    forcer = bool(request.args.get("frais"))
     with ThreadPoolExecutor(max_workers=3) as pool:
-        f_cmd = pool.submit(_lire_feuille, COMMANDES_WEBHOOK_URL, COMMANDES_FILE)
-        f_alt = pool.submit(_lire_feuille, ALERTES_WEBHOOK_URL, ALERTES_FILE)
+        f_cmd = pool.submit(_lire_feuille, COMMANDES_WEBHOOK_URL, COMMANDES_FILE, forcer)
+        f_alt = pool.submit(_lire_feuille, ALERTES_WEBHOOK_URL, ALERTES_FILE, forcer)
         f_stk = pool.submit(lire_stock)
         cmd, alt, stock_brut = f_cmd.result(), f_alt.result(), f_stk.result()
 
@@ -1010,8 +1065,10 @@ def api_dashboard():
     return jsonify({
         "maintenant": datetime.now().isoformat(timespec="seconds"),
         "sources": {
-            "commandes": {"source": cmd["source"], "erreur": cmd["erreur"]},
-            "alertes": {"source": alt["source"], "erreur": alt["erreur"]},
+            "commandes": {"source": cmd["source"], "erreur": cmd["erreur"], "chargement": bool(cmd.get("chargement")),
+                          "age": cmd.get("age"), "avertissement": cmd.get("avertissement")},
+            "alertes": {"source": alt["source"], "erreur": alt["erreur"], "chargement": bool(alt.get("chargement")),
+                        "age": alt.get("age"), "avertissement": alt.get("avertissement")},
         },
         "kpi": {
             "cmd_aujourdhui": par_jour[auj]["nb"],
