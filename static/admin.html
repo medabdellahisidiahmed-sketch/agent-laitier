@@ -220,9 +220,9 @@
     document.querySelectorAll(".valeur").forEach(v => v.classList.remove("squelette"));
   }
   // Interroge le serveur ; renvoie {ok, statut, donnees, message}
-  async function demander(){
+  async function demander(frais){
     let r;
-    try { r = await fetch("/admin/api/dashboard", { headers: { "X-Admin-Token": jeton }, cache:"no-store" }); }
+    try { r = await fetch("/admin/api/dashboard" + (frais ? "?frais=1" : ""), { headers: { "X-Admin-Token": jeton }, cache:"no-store" }); }
     catch(e) { return { ok:false, statut:0, message:"Pas de connexion internet ou serveur injoignable." }; }
     if (r.status === 401) return { ok:false, statut:401, message:"Mot de passe incorrect." };
     if (!r.ok) return { ok:false, statut:r.status, message:diagnostic(r.status) };
@@ -230,9 +230,9 @@
     catch(e) { return { ok:false, statut:200, message:"Réponse illisible du serveur (mauvaise version de agent_laitier.py ?)." }; }
   }
 
-  async function charger(){
+  async function charger(frais){
     $("actualiser").disabled = true;
-    const res = await demander();
+    const res = await demander(frais === true);
     $("actualiser").disabled = false;
     if (res.statut === 401) { deconnecter(res.message); return; }
     if (!res.ok) { $("maj").textContent = "Données indisponibles"; bandeau(res.message); return; }
@@ -399,7 +399,7 @@
   $("voir").onclick = () => { const m = $("mdp"); const cache = m.type === "password"; m.type = cache ? "text" : "password"; $("voir").textContent = cache ? "🙈" : "👁"; };
   $("entrer").onclick = entrer;
   $("mdp").addEventListener("keydown", e => { if (e.key === "Enter") entrer(); });
-  $("actualiser").onclick = charger;
+  $("actualiser").onclick = () => charger(true);
 
   jeton = lire("admin_jeton");
   if (jeton) ouvrir();

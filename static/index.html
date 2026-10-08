@@ -304,7 +304,7 @@
       ligne.className = "produit";
       const photo = p.photo ? `<img class="photo" src="${p.photo}" alt="">` : `<div class="photo">🥛</div>`;
       ligne.innerHTML = photo + `<div class="info"><b></b><span></span></div>
-        <div class="compteur"><button class="moins">−</button><div class="qte">0</div><button class="plus">+</button></div>`;
+        <div class="compteur"><button class="moins">−</button><div class="qte">${quantites[p.produit] || 0}</div><button class="plus">+</button></div>`;
       ligne.querySelector("b").textContent = p.produit;
       ligne.querySelector("span").textContent = p.prix_unitaire_mru + " MRU / " + p.unite;
       const q = ligne.querySelector(".qte");
@@ -375,8 +375,18 @@
     document.getElementById("confirmation").style.display = "none";
   };
 
-  fetch("/catalogue").then(r => r.json()).then(d => { produits = d; dessinerCatalogue(); })
-    .catch(() => { zoneCat.textContent = "Catalogue indisponible. Utilisez l'onglet Discuter."; });
+  // Catalogue : affichage immédiat depuis la dernière visite, puis mise à jour
+  let cat0 = null;
+  try { cat0 = JSON.parse(localStorage.getItem("catalogue_cache") || "null"); } catch (e) {}
+  if (Array.isArray(cat0) && cat0.length) { produits = cat0; dessinerCatalogue(); }
+  else {
+    zoneCat.textContent = "⏳ Chargement du catalogue…";
+    setTimeout(() => { if (!produits.length) zoneCat.textContent = "⏳ Le serveur se réveille, patientez jusqu'à 1 minute…"; }, 5000);
+  }
+  fetch("/catalogue").then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }).then(d => {
+    produits = d; dessinerCatalogue();
+    try { localStorage.setItem("catalogue_cache", JSON.stringify(d)); } catch (e) {}
+  }).catch(() => { if (!produits.length) zoneCat.textContent = "Catalogue indisponible. Utilisez l'onglet Discuter."; });
   afficherOnglet(true);
 
   // --- Installation PWA (icône sur l'écran d'accueil) ---
