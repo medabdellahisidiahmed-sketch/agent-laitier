@@ -916,34 +916,48 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
+VERSION = "2026-10-09a"
+_heure_lectures = {}  # clé -> heure de départ de la lecture en cours
+
+
 def _rafraichir_feuille(cle, webhook_url, fichier_local):
     """Lit Google (jusqu'à 2 essais). Garde toujours le dernier résultat réussi."""
-    resultat = None
-    for _ in range(2):
-        resultat = _lire_feuille_brut(webhook_url, fichier_local)
-        if not resultat["erreur"]:
-            break
-    if resultat["erreur"]:
-        _erreur_feuilles[cle] = resultat["erreur"]
-        print("[SHEETS] lecture échouée :", resultat["erreur"][:200])
-    else:
-        _erreur_feuilles.pop(cle, None)
-        _cache_feuilles[cle] = {"t": time.time(), "v": resultat}
-    with _verrou_lectures:
-        _lectures_en_cours.pop(cle, None)
+    resultat = {"erreur": "Lecture interrompue"}
+    try:
+        for _ in range(2):
+            resultat = _lire_feuille_brut(webhook_url, fichier_local)
+            if not resultat["erreur"]:
+                break
+        if resultat["erreur"]:
+            _erreur_feuilles[cle] = resultat["erreur"]
+            print("[SHEETS] lecture échouée :", str(resultat["erreur"])[:200])
+        else:
+            _erreur_feuilles.pop(cle, None)
+            _cache_feuilles[cle] = {"t": time.time(), "v": resultat}
+    except Exception as e:
+        _erreur_feuilles[cle] = "Erreur interne : " + str(e)
+        print("[SHEETS] ERREUR relecture :", e)
+    finally:
+        with _verrou_lectures:
+            _lectures_en_cours.pop(cle, None)
+            _heure_lectures.pop(cle, None)
     return resultat
 
 
 def lancer_rafraichissement(webhook_url, fichier_local):
-    """Démarre (une seule fois à la fois) la lecture de Google en arrière-plan."""
+    """Démarre (une seule fois à la fois) la lecture de Google en arrière-plan.
+    Une lecture bloquée depuis plus de 90 s est abandonnée et remplacée."""
     if not webhook_url:
         return None
     cle = (webhook_url, fichier_local)
     with _verrou_lectures:
         futur = _lectures_en_cours.get(cle)
+        if futur is not None and time.time() - _heure_lectures.get(cle, 0) > 90:
+            futur = None
         if futur is None:
             futur = _pool_lecture.submit(_rafraichir_feuille, cle, webhook_url, fichier_local)
             _lectures_en_cours[cle] = futur
+            _heure_lectures[cle] = time.time()
     return futur
 
 
@@ -963,17 +977,19 @@ def _lire_feuille(webhook_url, fichier_local, forcer=False):
     if entree and not forcer:
         if age > CACHE_FEUILLES_SECONDES:
             lancer_rafraichissement(webhook_url, fichier_local)
-        return {**entree["v"], "age": int(age), "avertissement": _erreur_feuilles.get(cle)}
+        return {**entree["v"], "age": int(age), "avertissement": _erreur_feuilles.get(cle),
+                "en_cours": cle in _lectures_en_cours}
 
     futur = lancer_rafraichissement(webhook_url, fichier_local)
     try:
-        futur.result(timeout=20 if forcer else 8)
+        futur.result(timeout=8)
     except Exception:
         pass
     entree = _cache_feuilles.get(cle)
     if entree:
         age = int(time.time() - entree["t"])
-        return {**entree["v"], "age": age, "avertissement": _erreur_feuilles.get(cle) if age > 5 else None}
+        return {**entree["v"], "age": age, "avertissement": _erreur_feuilles.get(cle) if age > 5 else None,
+                "en_cours": cle in _lectures_en_cours}
     if cle in _erreur_feuilles:
         return {"source": "sheets", "lignes": [], "erreur": _erreur_feuilles[cle]}
     return {"source": "sheets", "lignes": [], "erreur": None, "chargement": True}
@@ -1063,12 +1079,13 @@ def api_dashboard():
         return {k: l.get(k, "") for k in champs}
 
     return jsonify({
+        "version": VERSION,
         "maintenant": datetime.now().isoformat(timespec="seconds"),
         "sources": {
             "commandes": {"source": cmd["source"], "erreur": cmd["erreur"], "chargement": bool(cmd.get("chargement")),
-                          "age": cmd.get("age"), "avertissement": cmd.get("avertissement")},
+                          "age": cmd.get("age"), "avertissement": cmd.get("avertissement"), "en_cours": bool(cmd.get("en_cours"))},
             "alertes": {"source": alt["source"], "erreur": alt["erreur"], "chargement": bool(alt.get("chargement")),
-                        "age": alt.get("age"), "avertissement": alt.get("avertissement")},
+                        "age": alt.get("age"), "avertissement": alt.get("avertissement"), "en_cours": bool(alt.get("en_cours"))},
         },
         "kpi": {
             "cmd_aujourdhui": par_jour[auj]["nb"],
