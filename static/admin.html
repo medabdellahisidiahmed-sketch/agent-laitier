@@ -185,6 +185,7 @@
       <div class="carte"><h2>Dernières alertes</h2><div id="l-alt"></div></div>
     </section>
   </main>
+  <div id="version" style="text-align:center;color:var(--gris);font-size:12px;padding:0 0 90px"></div>
 
   <nav id="onglets-bas" aria-label="Sections">
     <button data-s="accueil" class="actif"><span class="ico">📊</span>Accueil</button>
@@ -206,6 +207,7 @@
   function ecrire(k,v){ try { v ? localStorage.setItem(k,v) : localStorage.removeItem(k); } catch(e){} }
 
   function el(tag, classe, texte){ const e=document.createElement(tag); if(classe) e.className=classe; if(texte!==undefined) e.textContent=texte; return e; }
+  function duree(sec){ return sec < 90 ? sec + " s" : (sec < 5400 ? Math.round(sec/60) + " min" : (sec < 172800 ? Math.round(sec/3600) + " h" : Math.round(sec/86400) + " j")); }
   function heure(iso){ return (iso||"").replace("T"," ").slice(5,16); }
 
   // Explique clairement pourquoi les données n'arrivent pas
@@ -225,26 +227,37 @@
   // Interroge le serveur ; renvoie {ok, statut, donnees, message}
   async function demander(frais){
     let r;
-    try { r = await fetch("/admin/api/dashboard" + (frais ? "?frais=1" : ""), { headers: { "X-Admin-Token": jeton }, cache:"no-store" }); }
-    catch(e) { return { ok:false, statut:0, message:"Pas de connexion internet ou serveur injoignable." }; }
+    const ctl = new AbortController(); const delai = setTimeout(() => ctl.abort(), 70000);
+    try { r = await fetch("/admin/api/dashboard" + (frais ? "?frais=1" : ""), { headers: { "X-Admin-Token": jeton }, cache:"no-store", signal: ctl.signal }); }
+    catch(e) { return { ok:false, statut:0, message: e.name === "AbortError" ? "Le serveur met trop de temps à répondre (il se réveille peut-être). Réessayez." : "Pas de connexion internet ou serveur injoignable." }; }
+    finally { clearTimeout(delai); }
     if (r.status === 401) return { ok:false, statut:401, message:"Mot de passe incorrect." };
     if (!r.ok) return { ok:false, statut:r.status, message:diagnostic(r.status) };
     try { return { ok:true, statut:200, donnees: await r.json() }; }
     catch(e) { return { ok:false, statut:200, message:"Réponse illisible du serveur (mauvaise version de agent_laitier.py ?)." }; }
   }
 
-  async function charger(frais){
-    $("actualiser").disabled = true;
+  let enCours = false;
+  async function charger(frais, silencieux){
+    if (enCours) return;                       // une seule demande à la fois
+    enCours = true;
+    const bouton = $("actualiser");
+    bouton.disabled = true; bouton.textContent = "⏳ Actualisation…";
+    if (!silencieux) $("maj").textContent = "Actualisation en cours…";
     const res = await demander(frais === true);
-    $("actualiser").disabled = false;
+    enCours = false;
+    bouton.disabled = false; bouton.textContent = "↻ Actualiser";
     if (res.statut === 401) { deconnecter(res.message); return; }
     if (!res.ok) { $("maj").textContent = "Données indisponibles"; bandeau(res.message); return; }
     try {
       afficher(res.donnees);
       const so = res.donnees.sources;
-      if (so.commandes.chargement || so.alertes.chargement) {
-        // Google met du temps : on ne garde pas ces données incomplètes, et on réessaie
-        if (tentatives++ < 12) setTimeout(charger, 4000);
+      const attente = so.commandes.chargement || so.alertes.chargement;
+      const miseAJour = so.commandes.en_cours || so.alertes.en_cours;
+      if (attente || miseAJour) {
+        // Google est lent : on réaffiche ce qu'on a, puis on revérifie sans bloquer l'écran
+        if (miseAJour && !attente) $("maj").textContent = "Google met à jour… (données de il y a " + duree(Math.max(so.commandes.age||0, so.alertes.age||0)) + ")";
+        if (tentatives++ < 12) setTimeout(() => charger(false, true), 4000);
       } else { tentatives = 0; ecrire("admin_cache", JSON.stringify(res.donnees)); }
     }
     catch(e) { $("maj").textContent = "Erreur d'affichage"; bandeau("Erreur d'affichage : " + e.message); }
@@ -252,13 +265,14 @@
 
   function afficher(d){
     $("maj").textContent = "Mis à jour à " + (d.maintenant||"").slice(11,16);
+    $("version").textContent = d.version ? "Version du serveur : " + d.version : "Version du serveur : ancienne (mettez à jour agent_laitier.py)";
 
     const av = $("avertissements"); av.innerHTML = "";
     ["commandes","alertes"].forEach(n => {
       const s = d.sources[n];
       const nom = n==="commandes" ? "Commandes" : "Alertes";
       if (s.chargement) av.appendChild(el("div","alerte-source","⏳ " + nom + " : Google répond lentement, chargement en cours…"));
-      else if (s.avertissement) av.appendChild(el("div","alerte-source","ℹ " + nom + " : données gardées en mémoire (il y a " + (s.age||0) + " s), Google n'a pas répondu à la dernière mise à jour."));
+      else if (s.avertissement) av.appendChild(el("div","alerte-source","⚠ " + nom + " : données anciennes (dernière lecture réussie il y a " + duree(s.age||0) + "). Google ne répond pas : " + String(s.avertissement).slice(0,160)));
       if (s.chargement) {}
       else if (s.erreur) av.appendChild(el("div","alerte-source","⚠ " + (n==="commandes"?"Commandes":"Alertes") + " : " + s.erreur));
       else if (s.source === "local") av.appendChild(el("div","alerte-source","ℹ " + (n==="commandes"?"Commandes":"Alertes") + " : lien Google Sheets non configuré, données de secours (temporaires)."));
@@ -409,7 +423,7 @@
       charger();
     }
     clearInterval(minuteur);
-    minuteur = setInterval(() => { if (!document.hidden) charger(); }, 60000);
+    minuteur = setInterval(() => { if (!document.hidden) charger(false, true); }, 60000);
   }
   function deconnecter(msg){
     clearInterval(minuteur); ecrire("admin_jeton",""); ecrire("admin_cache","");
@@ -431,7 +445,7 @@
   $("voir").onclick = () => { const m = $("mdp"); const cache = m.type === "password"; m.type = cache ? "text" : "password"; $("voir").textContent = cache ? "🙈" : "👁"; };
   $("entrer").onclick = entrer;
   $("mdp").addEventListener("keydown", e => { if (e.key === "Enter") entrer(); });
-  $("actualiser").onclick = () => charger(true);
+  $("actualiser").onclick = () => { tentatives = 0; charger(true); };
 
   jeton = lire("admin_jeton");
   if (jeton) ouvrir();
