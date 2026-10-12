@@ -178,14 +178,18 @@
     </section>
 
     <section class="section" id="s-commandes">
-      <div class="carte"><h2>Dernières commandes</h2><div id="l-cmd"></div></div>
+      <div class="carte"><h2>Dernières commandes</h2><div class="vide" id="i-cmd"></div><div id="l-cmd"></div></div>
     </section>
 
     <section class="section" id="s-alertes">
-      <div class="carte"><h2>Dernières alertes</h2><div id="l-alt"></div></div>
+      <div class="carte"><h2>Dernières alertes</h2><div class="vide" id="i-alt"></div><div id="l-alt"></div></div>
     </section>
   </main>
-  <div id="version" style="text-align:center;color:var(--gris);font-size:12px;padding:0 0 90px"></div>
+  <details id="diag" style="max-width:1180px;margin:0 auto;padding:0 14px;color:var(--gris);font-size:13px">
+    <summary style="cursor:pointer;padding:8px 0">🔎 Diagnostic (enregistrements vers Google)</summary>
+    <div id="journal" style="padding:4px 0 8px"></div>
+  </details>
+  <div id="version" style="text-align:center;color:var(--gris);font-size:12px;padding:8px 0 90px"></div>
 
   <nav id="onglets-bas" aria-label="Sections">
     <button data-s="accueil" class="actif"><span class="ico">📊</span>Accueil</button>
@@ -277,6 +281,18 @@
       else if (s.erreur) av.appendChild(el("div","alerte-source","⚠ " + (n==="commandes"?"Commandes":"Alertes") + " : " + s.erreur));
       else if (s.source === "local") av.appendChild(el("div","alerte-source","ℹ " + (n==="commandes"?"Commandes":"Alertes") + " : lien Google Sheets non configuré, données de secours (temporaires)."));
     });
+
+    // Ce que Google a vraiment renvoyé : permet de voir si les données sont anciennes
+    const info = (src, nom) => {
+      if (src.erreur || src.chargement) return "";
+      const der = src.derniere_date ? "la plus récente : " + src.derniere_date.replace("T"," ").slice(0,16) : "aucune ligne";
+      return src.nb_lignes + " ligne(s) lue(s), " + der + (src.locales ? " · dont " + src.locales + " en secours local (pas encore dans Google)" : "");
+    };
+    $("i-cmd").textContent = info(d.sources.commandes);
+    $("i-alt").textContent = info(d.sources.alertes);
+    const jr = $("journal"); jr.innerHTML = "";
+    if (!(d.journal_ecritures||[]).length) jr.appendChild(el("div","vide","Aucune écriture depuis le dernier démarrage du serveur."));
+    (d.journal_ecritures||[]).forEach(j => jr.appendChild(el("div","", j.heure + " · " + j.feuille + " · " + j.statut + (j.detail ? " (" + j.detail + ")" : ""))));
 
     const k = d.kpi;
     document.querySelectorAll(".valeur").forEach(v => v.classList.remove("squelette"));
