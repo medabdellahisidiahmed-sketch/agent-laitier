@@ -228,24 +228,44 @@ def _lire_stock_brut():
         return json.load(f)
 
 
+_journal_ecritures = []  # 15 derniers essais d'écriture vers Google (diagnostic du tableau de bord)
+
+
+def noter_ecriture(nom, statut, detail=""):
+    _journal_ecritures.append({"heure": datetime.now().strftime("%d/%m %H:%M:%S"),
+                               "feuille": nom, "statut": statut, "detail": str(detail)[:160]})
+    del _journal_ecritures[:-15]
+
+
 def ajouter_ligne(fichier, donnees, webhook_url=None):
     """Enregistre un événement (commande ou alerte) de façon durable.
     Priorité : Google Sheets (webhook_url), si configuré et accessible.
-    Sinon : fichier local .jsonl en secours (temporaire sur Render gratuit)."""
+    Sinon : fichier local .jsonl en secours (temporaire sur Render gratuit).
+    Le tableau de bord relit aussi ce fichier de secours : rien ne disparaît."""
     donnees = dict(donnees)
     donnees["Date"] = datetime.now().isoformat(timespec="seconds")
     nom = os.path.basename(fichier)
 
     if webhook_url:
         try:
-            r = requests.post(webhook_url, json=donnees, timeout=15)
+            # Écriture en arrière-plan : personne n'attend, on peut être patient
+            r = requests.post(webhook_url, json=donnees, timeout=45)
             succes, resume = _analyser_reponse_webhook(r)
             if succes:
                 print(f"[SHEETS] OK ({nom}) : ligne ajoutée dans Google Sheets.")
+                noter_ecriture(nom, "OK")
                 return  # écrit avec succès, terminé
             print(f"[SHEETS] ÉCHEC ({nom}) : {resume}. Écriture locale en secours.")
+            noter_ecriture(nom, "ÉCHEC → secours local", resume)
+        except requests.exceptions.Timeout:
+            # Google a reçu la ligne mais tarde à répondre : elle est très probablement
+            # enregistrée. On n'écrit pas en local pour éviter un doublon.
+            print(f"[SHEETS] DÉLAI DÉPASSÉ ({nom}) : ligne probablement enregistrée par Google.")
+            noter_ecriture(nom, "DÉLAI (probablement enregistré)", "Google a mis plus de 45 s à répondre")
+            return
         except Exception as e:
             print(f"[SHEETS] ERREUR ({nom}) : {e}. Écriture locale en secours.")
+            noter_ecriture(nom, "ERREUR → secours local", e)
     else:
         print(f"[SHEETS] Aucun webhook configuré pour {nom} : écriture locale uniquement.")
 
@@ -916,7 +936,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-09a"
+VERSION = "2026-10-12a"
 _heure_lectures = {}  # clé -> heure de départ de la lecture en cours
 
 
@@ -1040,8 +1060,15 @@ def api_dashboard():
         f_stk = pool.submit(lire_stock)
         cmd, alt, stock_brut = f_cmd.result(), f_alt.result(), f_stk.result()
 
-    commandes = sorted(cmd["lignes"], key=lambda l: str(l.get("Date", "")), reverse=True)
-    alertes = sorted(alt["lignes"], key=lambda l: str(l.get("Date", "")), reverse=True)
+    # Lignes qui n'ont pas pu partir vers Google (fichier de secours) : on les ajoute
+    locales_cmd = lire_lignes_jsonl(COMMANDES_FILE) if COMMANDES_WEBHOOK_URL else []
+    locales_alt = lire_lignes_jsonl(ALERTES_FILE) if ALERTES_WEBHOOK_URL else []
+    commandes = sorted(cmd["lignes"] + locales_cmd, key=lambda l: str(l.get("Date", "")), reverse=True)
+    alertes = sorted(alt["lignes"] + locales_alt, key=lambda l: str(l.get("Date", "")), reverse=True)
+
+    def stats(lignes, locales):
+        dates = [str(l.get("Date", "")) for l in lignes if l.get("Date")]
+        return {"nb_lignes": len(lignes), "locales": len(locales), "derniere_date": max(dates) if dates else ""}
 
     aujourdhui = datetime.now().date()
     jours = [(aujourdhui - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
@@ -1083,9 +1110,11 @@ def api_dashboard():
         "maintenant": datetime.now().isoformat(timespec="seconds"),
         "sources": {
             "commandes": {"source": cmd["source"], "erreur": cmd["erreur"], "chargement": bool(cmd.get("chargement")),
-                          "age": cmd.get("age"), "avertissement": cmd.get("avertissement"), "en_cours": bool(cmd.get("en_cours"))},
+                          "age": cmd.get("age"), "avertissement": cmd.get("avertissement"), "en_cours": bool(cmd.get("en_cours")),
+                          **stats(commandes, locales_cmd)},
             "alertes": {"source": alt["source"], "erreur": alt["erreur"], "chargement": bool(alt.get("chargement")),
-                        "age": alt.get("age"), "avertissement": alt.get("avertissement"), "en_cours": bool(alt.get("en_cours"))},
+                        "age": alt.get("age"), "avertissement": alt.get("avertissement"), "en_cours": bool(alt.get("en_cours")),
+                        **stats(alertes, locales_alt)},
         },
         "kpi": {
             "cmd_aujourdhui": par_jour[auj]["nb"],
@@ -1103,6 +1132,7 @@ def api_dashboard():
         "dernieres_alertes": [court(a, ["Date", "Client", "Categorie", "Message"]) for a in alertes[:6]],
         "stock": stock,
         "stock_resume": stock_resume,
+        "journal_ecritures": list(reversed(_journal_ecritures)),
     }), 200
 
 
