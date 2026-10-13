@@ -233,8 +233,46 @@ _journal_ecritures = []  # 15 derniers essais d'écriture vers Google (diagnosti
 
 def noter_ecriture(nom, statut, detail=""):
     _journal_ecritures.append({"heure": datetime.now().strftime("%d/%m %H:%M:%S"),
-                               "feuille": nom, "statut": statut, "detail": str(detail)[:160]})
+                               "feuille": nom, "statut": statut, "detail": str(detail)[:320]})
     del _journal_ecritures[:-15]
+
+
+_verrou_secours = threading.Lock()
+
+
+def _rejouer_secours(fichier, webhook_url):
+    """Quand Google fonctionne de nouveau, renvoie les lignes mises de côté dans
+    le fichier de secours, puis les retire du fichier."""
+    if not webhook_url or not os.path.exists(fichier):
+        return
+    with _verrou_secours:
+        with open(fichier, encoding="utf-8") as f:
+            lignes = [l for l in f.read().splitlines() if l.strip()]
+        if not lignes:
+            return
+        restantes = []
+        for l in lignes:
+            try:
+                r = requests.post(webhook_url, json=json.loads(l), timeout=45)
+                ok, _ = _analyser_reponse_webhook(r)
+            except Exception:
+                ok = False
+            if not ok:
+                restantes.append(l)
+        with open(fichier, "w", encoding="utf-8") as f:
+            f.write("".join(l + "\n" for l in restantes))
+        envoyees = len(lignes) - len(restantes)
+        if envoyees:
+            print(f"[SHEETS] {envoyees} ligne(s) de secours renvoyées vers Google.")
+            noter_ecriture(os.path.basename(fichier), "REJOUÉ", f"{envoyees} ligne(s) de secours envoyées à Google")
+
+
+def _indice_erreur_script(resume):
+    """Traduit les erreurs fréquentes d'Apps Script en conseil clair."""
+    if "Colonne 'Produit'" in resume:
+        return (" → CE SHEET CONTIENT LE SCRIPT DU STOCK. Collez-y AppsScript_Commandes_Alertes.gs "
+                "(ou vérifiez que l'adresse /exec sur Render est bien celle de ce Sheet).")
+    return ""
 
 
 def ajouter_ligne(fichier, donnees, webhook_url=None):
@@ -254,9 +292,10 @@ def ajouter_ligne(fichier, donnees, webhook_url=None):
             if succes:
                 print(f"[SHEETS] OK ({nom}) : ligne ajoutée dans Google Sheets.")
                 noter_ecriture(nom, "OK")
+                _rejouer_secours(fichier, webhook_url)  # renvoie ce qui avait été mis de côté
                 return  # écrit avec succès, terminé
             print(f"[SHEETS] ÉCHEC ({nom}) : {resume}. Écriture locale en secours.")
-            noter_ecriture(nom, "ÉCHEC → secours local", resume)
+            noter_ecriture(nom, "ÉCHEC → secours local", resume + _indice_erreur_script(resume))
         except requests.exceptions.Timeout:
             # Google a reçu la ligne mais tarde à répondre : elle est très probablement
             # enregistrée. On n'écrit pas en local pour éviter un doublon.
@@ -270,8 +309,9 @@ def ajouter_ligne(fichier, donnees, webhook_url=None):
         print(f"[SHEETS] Aucun webhook configuré pour {nom} : écriture locale uniquement.")
 
     # Secours local (ou comportement par défaut si aucun webhook configuré)
-    with open(fichier, "a", encoding="utf-8") as f:
-        f.write(json.dumps(donnees, ensure_ascii=False) + "\n")
+    with _verrou_secours:
+        with open(fichier, "a", encoding="utf-8") as f:
+            f.write(json.dumps(donnees, ensure_ascii=False) + "\n")
 
 
 _pool_ecriture = ThreadPoolExecutor(max_workers=4)
@@ -364,15 +404,33 @@ sans jamais les changer ni en inventer d'autres :
 }}"""
 
 
-def demander_a_ia(message_client, stock, max_essais=3):
+class PlafondIA(Exception):
+    """Tous les modèles gratuits ont atteint leur limite (erreur 429)."""
+    def __init__(self, attente=60):
+        super().__init__("Limite gratuite de l'IA atteinte")
+        self.attente = attente
+
+
+# Chaque modèle Groq a SES PROPRES limites gratuites : quand le premier est
+# saturé, on essaie les suivants. Modifiable sur Render : GROQ_MODELES_SECOURS
+# (noms séparés par des virgules, ou vide pour désactiver).
+MODELES_SECOURS = [m.strip() for m in os.environ.get(
+    "GROQ_MODELES_SECOURS", "openai/gpt-oss-20b,qwen/qwen3.8-27b").split(",") if m.strip()]
+
+_etat_ia = {"modele": "", "requetes_restantes_jour": None, "dernier_plafond": "", "nb_plafonds": 0}
+
+
+def demander_a_ia(message_client, stock, max_essais=2):
     """Envoie le prompt à Groq (API compatible OpenAI) et renvoie le JSON
     déjà décodé (dictionnaire Python), prêt à utiliser.
-    Réessaie automatiquement en cas d'indisponibilité temporaire."""
+    Essaie d'abord GROQ_MODEL, puis les modèles de secours si la limite
+    gratuite (429) est atteinte. Lève PlafondIA si tous sont saturés."""
     import time
 
     prompt = PROMPT_SYSTEME.format(
         societe=NOM_SOCIETE,
-        stock=json.dumps([{k: v for k, v in p.items() if k not in ("photo", "seuil")} for p in stock], ensure_ascii=False),
+        stock=json.dumps([{k: v for k, v in p.items() if k not in ("photo", "seuil")} for p in stock],
+                         ensure_ascii=False, separators=(",", ":")),
         message=message_client,
     )
 
@@ -381,41 +439,61 @@ def demander_a_ia(message_client, stock, max_essais=3):
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
 
+    modeles = [GROQ_MODEL] + [m for m in MODELES_SECOURS if m != GROQ_MODEL]
+    attente_max = 0
     derniere_erreur = None
-    data = None
-    for essai in range(1, max_essais + 1):
-        try:
-            reponse = requests.post(url, headers=headers, json=payload, timeout=60)
-            if reponse.status_code in (429, 503):
-                print(f"IA indisponible (essai {essai}/{max_essais}), nouvelle tentative...")
-                time.sleep(3 * essai)
-                continue
-            reponse.raise_for_status()
-            data = reponse.json()
-            break
-        except requests.exceptions.RequestException as e:
-            derniere_erreur = e
-            time.sleep(3 * essai)
-    else:
-        raise derniere_erreur or Exception("IA indisponible après plusieurs essais")
+    for modele in modeles:
+        payload = {
+            "model": modele,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+        }
+        for essai in range(1, max_essais + 1):
+            try:
+                reponse = requests.post(url, headers=headers, json=payload, timeout=60)
+                if reponse.status_code == 429:
+                    # Limite gratuite atteinte pour CE modèle : on passe au suivant sans attendre
+                    try:
+                        attente_max = max(attente_max, int(float(reponse.headers.get("retry-after", 60))))
+                    except ValueError:
+                        attente_max = max(attente_max, 60)
+                    _etat_ia["nb_plafonds"] += 1
+                    _etat_ia["dernier_plafond"] = datetime.now().strftime("%d/%m %H:%M") + " (" + modele + ")"
+                    print(f"[IA] limite gratuite atteinte pour {modele}, modèle suivant...")
+                    break
+                if reponse.status_code == 503:
+                    print(f"[IA] {modele} indisponible (essai {essai}/{max_essais})...")
+                    time.sleep(2 * essai)
+                    continue
+                if reponse.status_code in (400, 404):
+                    derniere_erreur = Exception(f"{modele} : refusé (HTTP {reponse.status_code}) {reponse.text[:120]}")
+                    print("[IA]", derniere_erreur)
+                    break  # modèle inconnu ou incompatible : suivant
+                reponse.raise_for_status()
+                data = reponse.json()
+                _etat_ia["modele"] = modele
+                restant = reponse.headers.get("x-ratelimit-remaining-requests")
+                if restant is not None:
+                    _etat_ia["requetes_restantes_jour"] = restant
 
-    if data is None:
-        raise derniere_erreur or Exception("IA indisponible après plusieurs essais")
+                texte = data["choices"][0]["message"]["content"]
+                # Nettoyage au cas où le modèle entoure le JSON de ```json ... ```
+                texte_propre = re.sub(r"^```json\s*|\s*```$", "", texte.strip())
+                try:
+                    return json.loads(texte_propre)
+                except ValueError as e:
+                    derniere_erreur = e
+                    print(f"[IA] réponse JSON illisible avec {modele}, modèle suivant...")
+                    break
+            except requests.exceptions.RequestException as e:
+                derniere_erreur = e
+                time.sleep(2 * essai)
 
-    # On extrait le texte de la réponse (format Groq/OpenAI, différent de Gemini)
-    texte = data["choices"][0]["message"]["content"]
-
-    # Nettoyage au cas où le modèle entoure le JSON de ```json ... ```
-    texte_propre = re.sub(r"^```json\s*|\s*```$", "", texte.strip())
-
-    return json.loads(texte_propre)
+    if attente_max and not derniere_erreur:
+        raise PlafondIA(attente_max)
+    raise derniere_erreur or PlafondIA(attente_max or 60)
 
 
 # ============================================================
@@ -443,7 +521,48 @@ def envoyer_whatsapp(numero_destinataire, texte):
 # ============================================================
 # 5. LE "CERVEAU" : traite un message entrant et décide quoi faire
 # ============================================================
-def generer_reponse(identifiant_client, texte_client):
+def _nettoyer_texte(valeur, longueur):
+    """Texte court sans caractères de contrôle."""
+    return re.sub(r"[\x00-\x1f\x7f]", " ", str(valeur or "")).strip()[:longueur]
+
+
+def _normaliser_tel(valeur):
+    """Chiffres seulement ; retire l'indicatif de la Mauritanie (+222 / 00222)
+    pour qu'un même numéro écrit de deux façons reste le même client."""
+    t = re.sub(r"\D", "", str(valeur or ""))
+    if t.startswith("00222") and len(t) >= 13:
+        t = t[5:]
+    elif t.startswith("222") and len(t) == 11:
+        t = t[3:]
+    return t[:15]
+
+
+def _client_depuis(data):
+    """Profil envoyé par l'appli : {nom, tel, quartier}, nettoyé."""
+    c = data.get("client")
+    if not isinstance(c, dict):
+        c = {}
+    return {
+        "nom": _nettoyer_texte(c.get("nom"), 60),
+        "tel": _normaliser_tel(c.get("tel")),
+        "quartier": _nettoyer_texte(c.get("quartier"), 60),
+    }
+
+
+def _client_valide(c):
+    return len(c.get("nom", "")) >= 2 and len(c.get("tel", "")) >= 8
+
+
+def _champs_client(identifiant, client):
+    """Colonnes Client / Telephone / Quartier écrites dans les Sheets."""
+    if client and client.get("nom"):
+        return {"Client": client["nom"], "Telephone": client.get("tel", ""), "Quartier": client.get("quartier", "")}
+    # Canal WhatsApp : l'identifiant est le numéro de téléphone du client
+    tel = str(identifiant) if re.fullmatch(r"\d{8,15}", str(identifiant)) else ""
+    return {"Client": identifiant, "Telephone": tel, "Quartier": ""}
+
+
+def generer_reponse(identifiant_client, texte_client, client=None):
     """Cœur commun à TOUS les canaux (WhatsApp, chat web, Telegram plus tard...).
     Interroge l'IA, journalise commande/alerte, renvoie le résultat complet.
     Ne s'occupe PAS d'envoyer le message : c'est au code appelant de choisir
@@ -461,14 +580,14 @@ def generer_reponse(identifiant_client, texte_client):
 
     if escalade:
         ajouter_ligne_arriere_plan(ALERTES_FILE, {
-            "Client": identifiant_client,
+            **_champs_client(identifiant_client, client),
             "Categorie": categorie,
             "Message": texte_client,
             "Reponse": reponse_client,
         }, webhook_url=ALERTES_WEBHOOK_URL)
     elif commande:
         ajouter_ligne_arriere_plan(COMMANDES_FILE, {
-            "Client": identifiant_client,
+            **_champs_client(identifiant_client, client),
             "Message": texte_client,
             "Total MRU": commande.get("total_commande_mru", ""),
             "Livraison": commande.get("date_livraison_souhaitee", ""),
@@ -724,8 +843,13 @@ def chat_web():
         return jsonify({"reponse": "Message vide."}), 400
 
     try:
-        resultat = generer_reponse(id_client, message)
+        resultat = generer_reponse(id_client, message, _client_depuis(data))
         return jsonify({"reponse": resultat.get("reponse_client", "")}), 200
+    except PlafondIA as e:
+        print("[IA] plafond gratuit atteint sur tous les modèles")
+        return jsonify({"reponse": "Le chat est très sollicité en ce moment. 🙏 "
+                        "Pour commander, utilisez l'onglet « Commander » (les boutons), "
+                        "ou réessayez dans " + ("une minute." if e.attente <= 90 else "quelques minutes.")}), 200
     except Exception as e:
         print("Erreur /chat :", e)
         return jsonify({"reponse": "Désolé, une erreur technique est survenue. Réessayez."}), 200
@@ -747,6 +871,10 @@ def commander():
     id_client = (data.get("id_client") or "web-anonyme")[:60]
     lignes = data.get("lignes") or []
     jour = data.get("livraison", "demain")
+    client = _client_depuis(data)
+    if not _client_valide(client):
+        return jsonify({"ok": False, "profil_requis": True, "message":
+            "Pour livrer votre commande, écrivez d'abord le nom de votre boutique et votre téléphone."}), 200
 
     stock = {p["produit"]: p for p in lire_stock()}
     total, resume = 0, []
@@ -769,12 +897,12 @@ def commander():
 
     date_liv = datetime.now() + timedelta(days=0 if jour == "aujourdhui" else 1)
     ajouter_ligne_arriere_plan(COMMANDES_FILE, {
-        "Client": id_client,
+        **_champs_client(id_client, client),
         "Message": "Catalogue : " + " ; ".join(resume),
         "Total MRU": total,
         "Livraison": date_liv.strftime("%Y-%m-%d"),
     }, webhook_url=COMMANDES_WEBHOOK_URL)
-    print(f"[CATALOGUE] commande {id_client} total={total}")
+    print(f"[CATALOGUE] commande {client['nom']} ({client['tel']}) total={total}")
     return jsonify({"ok": True, "total": total, "resume": resume,
                     "livraison": date_liv.strftime("%Y-%m-%d")}), 200
 
@@ -855,7 +983,7 @@ def consulter_commandes():
     html = _page_html_donnees(
         "📦 Commandes enregistrées (secours local — voir aussi votre Google Sheets)",
         commandes,
-        ["Date", "Client", "Message", "Total MRU", "Livraison"],
+        ["Date", "Client", "Telephone", "Quartier", "Message", "Total MRU", "Livraison"],
     )
     return html, 200
 
@@ -871,7 +999,7 @@ def consulter_alertes():
     html = _page_html_donnees(
         "⚠️ Alertes à traiter (secours local — voir aussi votre Google Sheets)",
         alertes,
-        ["Date", "Client", "Categorie", "Message", "Reponse"],
+        ["Date", "Client", "Telephone", "Quartier", "Categorie", "Message", "Reponse"],
     )
     return html, 200
 
@@ -936,7 +1064,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-12a"
+VERSION = "2026-10-13b"
 _heure_lectures = {}  # clé -> heure de départ de la lecture en cours
 
 
@@ -1128,11 +1256,12 @@ def api_dashboard():
         },
         "serie_7j": [{"jour": j, **par_jour[j]} for j in jours],
         "alertes_par_categorie": categories,
-        "dernieres_commandes": [court(c, ["Date", "Client", "Message", "Total MRU", "Livraison"]) for c in commandes[:6]],
-        "dernieres_alertes": [court(a, ["Date", "Client", "Categorie", "Message"]) for a in alertes[:6]],
+        "dernieres_commandes": [court(c, ["Date", "Client", "Telephone", "Quartier", "Message", "Total MRU", "Livraison"]) for c in commandes[:6]],
+        "dernieres_alertes": [court(a, ["Date", "Client", "Telephone", "Quartier", "Categorie", "Message"]) for a in alertes[:6]],
         "stock": stock,
         "stock_resume": stock_resume,
         "journal_ecritures": list(reversed(_journal_ecritures)),
+        "ia": dict(_etat_ia, modeles=[GROQ_MODEL] + [m for m in MODELES_SECOURS if m != GROQ_MODEL]),
     }), 200
 
 
@@ -1142,6 +1271,13 @@ def page_admin():
     """Page du tableau de bord (la page elle-même est publique mais vide :
     les données exigent le mot de passe)."""
     return app.send_static_file("admin.html")
+
+
+@app.route("/sante", methods=["GET", "HEAD"])
+def sante():
+    """Adresse très légère pour un service de ping (garde le serveur éveillé).
+    Ne touche ni Google ni l'IA : répond en quelques millisecondes."""
+    return jsonify({"statut": "ok", "version": VERSION}), 200
 
 
 @app.route("/", methods=["GET"])
