@@ -117,6 +117,10 @@
   [hidden] { display:none !important; }
   @keyframes flash { 0%,60% { box-shadow:0 0 0 3px var(--bleu); } 100% { box-shadow:0 0 0 0 transparent; } }
   .flash { animation:flash 1.6s ease-out; }
+  #alarme { position:sticky; top:0; z-index:20; background:var(--rouge); color:#fff; padding:12px 14px; display:flex; gap:12px; align-items:center; justify-content:space-between; animation:clignote 1s steps(2) infinite; }
+  #alarme-texte { white-space:pre-line; font-size:14px; line-height:1.4; max-height:30vh; overflow:auto; }
+  #alarme button { flex:none; background:#fff; color:var(--rouge); border:none; border-radius:10px; padding:12px 14px; font-weight:700; font-size:15px; }
+  @keyframes clignote { 50% { background:#E0554A; } }
 </style>
 </head>
 <body>
@@ -137,8 +141,15 @@
 <div id="tableau" hidden>
   <header>
     <div><b>📊 Tableau de bord</b><small id="maj">…</small></div>
-    <button id="actualiser" aria-label="Actualiser">↻ Actualiser</button>
+    <div style="display:flex;gap:8px">
+      <button id="son" aria-label="Alarme sonore" title="Alarme sonore à chaque nouvelle commande">🔕</button>
+      <button id="actualiser" aria-label="Actualiser">↻ Actualiser</button>
+    </div>
   </header>
+  <div id="alarme" hidden role="alert">
+    <div id="alarme-texte"></div>
+    <button id="alarme-ok" type="button">✔ J'ai vu</button>
+  </div>
   <main>
     <div id="avertissements"></div>
 
@@ -187,6 +198,8 @@
   </main>
   <details id="diag" style="max-width:1180px;margin:0 auto;padding:0 14px;color:var(--gris);font-size:13px">
     <summary style="cursor:pointer;padding:8px 0">🔎 Diagnostic (enregistrements vers Google)</summary>
+    <div style="padding:4px 0"><span id="etat-notif"></span>
+      <button id="btn-notif" type="button" style="margin-left:6px;padding:4px 10px;border:1px solid var(--gris);border-radius:8px;background:none;color:inherit;cursor:pointer">Tester l'alerte</button></div>
     <div id="etat-ia" style="padding:4px 0"></div>
     <div id="journal" style="padding:4px 0 8px"></div>
   </details>
@@ -213,15 +226,38 @@
 
   function el(tag, classe, texte){ const e=document.createElement(tag); if(classe) e.className=classe; if(texte!==undefined) e.textContent=texte; return e; }
   function duree(sec){ return sec < 90 ? sec + " s" : (sec < 5400 ? Math.round(sec/60) + " min" : (sec < 172800 ? Math.round(sec/3600) + " h" : Math.round(sec/86400) + " j")); }
-  // Ligne « 📍 quartier · 📞 téléphone » (le numéro est cliquable pour appeler). Le texte reste inséré en textContent.
+  // Ligne « 📍 quartier · 📞 téléphone » (le numéro est cliquable pour appeler). Texte inséré en textContent.
+  function numero(ligne){ return String(ligne.Telephone || "").replace(/\D/g, ""); }
+  function nouveauClient(ligne){ return !!ligne.Client && !String(ligne.Client).startsWith("web-"); }
   function coordonnees(ligne){
-    const tel = String(ligne.Telephone || "").replace(/\D/g, "");
+    const tel = numero(ligne);
     const quartier = String(ligne.Quartier || "").trim();
-    if (!tel && !quartier) return null;
+    if (!tel && !quartier && !nouveauClient(ligne)) return null;
     const d = el("div","bas");
-    if (quartier) d.appendChild(document.createTextNode("📍 " + quartier + (tel ? " · " : "")));
+    if (quartier) d.appendChild(document.createTextNode("📍 " + quartier + " · "));
     if (tel) { const a = el("a","", "📞 " + tel); a.href = "tel:" + tel; a.style.color = "var(--bleu)"; d.appendChild(a); }
+    else d.appendChild(document.createTextNode("📞 numéro non reçu"));
     return d;
+  }
+  // Fiche détaillée affichée quand on touche une ligne
+  function fiche(ligne, avecLivraison){
+    const f = el("div","bas"); f.style.cssText = "background:var(--fond);border-radius:10px;padding:10px;margin-top:8px;line-height:1.7";
+    f.appendChild(el("div","", "👤 " + (ligne.Client || "Client")));
+    const tel = numero(ligne);
+    if (tel) {
+      const r = el("div",""); const a1 = el("a","", "📞 Appeler " + tel); a1.href = "tel:" + tel;
+      const wa = el("a","", "💬 WhatsApp"); wa.href = "https://wa.me/" + (tel.length === 8 ? "222" + tel : tel); wa.target = "_blank"; wa.rel = "noopener";
+      [a1, wa].forEach(x => { x.style.cssText = "color:var(--bleu);margin-right:14px;font-weight:600"; r.appendChild(x); });
+      f.appendChild(r);
+    } else f.appendChild(el("div","", "📞 Numéro non reçu (commande ancienne, ou colonne « Telephone » absente du Sheet)"));
+    f.appendChild(el("div","", "📍 " + (String(ligne.Quartier || "").trim() || "Quartier non reçu")));
+    if (avecLivraison && ligne.Livraison) f.appendChild(el("div","", "🚚 Livraison : " + String(ligne.Livraison).slice(0,10)));
+    return f;
+  }
+  function rendreCliquable(l, ligne, avecLivraison){
+    const f = fiche(ligne, avecLivraison); f.hidden = true; l.appendChild(f);
+    l.style.cursor = "pointer";
+    l.onclick = (e) => { if (e.target.closest("a")) return; f.hidden = !f.hidden; };
   }
   function heure(iso){ return (iso||"").replace("T"," ").slice(5,16); }
 
@@ -288,6 +324,7 @@
       const nom = n==="commandes" ? "Commandes" : "Alertes";
       if (s.chargement) av.appendChild(el("div","alerte-source","⏳ " + nom + " : Google répond lentement, chargement en cours…"));
       else if (s.avertissement) av.appendChild(el("div","alerte-source","⚠ " + nom + " : données anciennes (dernière lecture réussie il y a " + duree(s.age||0) + "). Google ne répond pas : " + String(s.avertissement).slice(0,160)));
+      if ((s.colonnes_manquantes || []).length) av.appendChild(el("div","alerte-source","⚠ " + nom + " : le Google Sheet n'a pas la/les colonne(s) « " + s.colonnes_manquantes.join(" » et « ") + " ». Ajoutez-les dans la ligne 1 (sans accent), à droite des autres colonnes. Les commandes passées avant ne les contiennent pas."));
       if (s.chargement) {}
       else if (s.erreur) av.appendChild(el("div","alerte-source","⚠ " + (n==="commandes"?"Commandes":"Alertes") + " : " + s.erreur));
       else if (s.source === "local") av.appendChild(el("div","alerte-source","ℹ " + (n==="commandes"?"Commandes":"Alertes") + " : lien Google Sheets non configuré, données de secours (temporaires)."));
@@ -306,6 +343,10 @@
       " · modèles prévus : " + (ia.modeles||[]).join(" → ") +
       (ia.requetes_restantes_jour ? " · requêtes restantes aujourd'hui (modèle courant) : " + ia.requetes_restantes_jour : "") +
       (ia.nb_plafonds ? " · plafond gratuit atteint " + ia.nb_plafonds + " fois, dernier : " + ia.dernier_plafond : " · plafond gratuit jamais atteint");
+    const nt = d.notif || {};
+    $("etat-notif").textContent = "Alerte " + [nt.email ? "e-mail" : "", nt.telegram ? "Telegram" : ""].filter(Boolean).join(" + ") + " : " + (!nt.configure ? "non configurée"
+      : (nt.email_ok === false || nt.ok === false) ? "dernier envoi ÉCHOUÉ (" + (nt.email_erreur || nt.erreur) + ")"
+      : (nt.email_ok || nt.ok) ? "dernier envoi réussi" : "configurée (aucun envoi depuis le démarrage)");
     const jr = $("journal"); jr.innerHTML = "";
     if (!(d.journal_ecritures||[]).length) jr.appendChild(el("div","vide","Aucune écriture depuis le dernier démarrage du serveur."));
     (d.journal_ecritures||[]).forEach(j => jr.appendChild(el("div","", j.heure + " · " + j.feuille + " · " + j.statut + (j.detail ? " (" + j.detail + ")" : ""))));
@@ -384,6 +425,7 @@
       const co = coordonnees(c); if (co) l.appendChild(co);
       l.appendChild(el("div","bas", heure(c.Date) + (c.Livraison ? " · livraison " + String(c.Livraison).slice(0,10) : "")));
       if (c.Message) l.appendChild(el("div","bas", c.Message));
+      rendreCliquable(l, c, true);
       lc.appendChild(l);
     });
 
@@ -397,6 +439,7 @@
       const co2 = coordonnees(a); if (co2) l.appendChild(co2);
       l.appendChild(el("div","bas", heure(a.Date)));
       if (a.Message) l.appendChild(el("div","bas", a.Message));
+      rendreCliquable(l, a, false);
       la.appendChild(l);
     });
 
@@ -480,9 +523,88 @@
   $("entrer").onclick = entrer;
   $("mdp").addEventListener("keydown", e => { if (e.key === "Enter") entrer(); });
   $("actualiser").onclick = () => { tentatives = 0; charger(true); };
+  $("btn-notif").onclick = async () => {
+    const b = $("btn-notif"); b.disabled = true; b.textContent = "Envoi…";
+    try {
+      const r = await fetch("/admin/api/test-notif", { method:"POST", headers:{ "X-Admin-Token": jeton } });
+      const j = await r.json(); alert(j.message || "Terminé");
+    } catch (e) { alert("Impossible de joindre le serveur : " + e); }
+    b.disabled = false; b.textContent = "Tester l'alerte";
+    charger(true);
+  };
+
+
+  // ---------- Alarme sonore : bip répété jusqu'à « J'ai vu » ----------
+  let ctxAudio = null, minuteurAlarme = null, minuteurEvt = null, verrouEcran = null, nouveaux = [];
+  function bip(){
+    try {
+      if (!ctxAudio) return;
+      if (ctxAudio.state === "suspended") ctxAudio.resume();
+      [0, 0.28, 0.56].forEach(dec => {
+        const o = ctxAudio.createOscillator(), g = ctxAudio.createGain();
+        o.type = "square"; o.frequency.value = 880; o.connect(g); g.connect(ctxAudio.destination);
+        const t = ctxAudio.currentTime + dec;
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.5, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+        o.start(t); o.stop(t + 0.22);
+      });
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 200]);
+    } catch(e) {}
+  }
+  function majBoutonSon(){
+    const actif = lire("admin_son") === "1";
+    $("son").textContent = actif ? "🔔" : "🔕";
+    $("son").title = actif ? "Alarme sonore activée (appuyez pour couper)" : "Appuyez pour activer l'alarme sonore";
+  }
+  async function garderEcranAllume(){
+    try { if (navigator.wakeLock && lire("admin_son") === "1" && !document.hidden) verrouEcran = await navigator.wakeLock.request("screen"); } catch(e) {}
+  }
+  function arreterAlarme(){
+    clearInterval(minuteurAlarme); minuteurAlarme = null;
+    $("alarme").hidden = true; document.title = "Tableau de bord";
+    if (nouveaux.length) { ecrire("admin_evt_vu", String(Math.max.apply(null, nouveaux.map(e => e.id)))); }
+    nouveaux = [];
+  }
+  function declencherAlarme(liste){
+    nouveaux = nouveaux.concat(liste);
+    const n = nouveaux.length;
+    $("alarme-texte").textContent = (ctxAudio ? "" : "🔈 Touchez l'écran une fois pour activer le son\n") + (n > 1 ? n + " nouveaux événements — dernier :\n" : "") + nouveaux[nouveaux.length - 1].texte;
+    $("alarme").hidden = false; document.title = "🔔 (" + n + ") Nouvelle commande";
+    if (!minuteurAlarme) { bip(); minuteurAlarme = setInterval(bip, 3000); }
+    charger(true, true);   // met aussi à jour les chiffres et les listes
+  }
+  async function verifierEvenements(){
+    if (lire("admin_son") !== "1" || !jeton) return;
+    try {
+      const r = await fetch("/admin/api/evenements", { headers: { "X-Admin-Token": jeton }, cache: "no-store" });
+      if (!r.ok) return;
+      const liste = (await r.json()).evenements || [];
+      const vuTxt = lire("admin_evt_vu");
+      const max = liste.length ? Math.max.apply(null, liste.map(e => e.id)) : 0;
+      if (!vuTxt) { ecrire("admin_evt_vu", String(max)); return; }   // première activation : pas de fausse alarme
+      if (!liste.length) return;
+      const deja = new Set(nouveaux.map(e => e.id)), vu = Number(vuTxt);
+      const neufs = liste.filter(e => e.id > vu && !deja.has(e.id));
+      if (neufs.length) declencherAlarme(neufs);
+    } catch(e) {}
+  }
+  function demarrerSurveillance(){
+    clearInterval(minuteurEvt);
+    if (lire("admin_son") === "1") { minuteurEvt = setInterval(verifierEvenements, 10000); verifierEvenements(); garderEcranAllume(); }
+  }
+  $("son").onclick = () => {
+    if (lire("admin_son") === "1") { ecrire("admin_son", ""); clearInterval(minuteurEvt); arreterAlarme(); try { verrouEcran && verrouEcran.release(); } catch(e) {} majBoutonSon(); return; }
+    try { ctxAudio = ctxAudio || new (window.AudioContext || window.webkitAudioContext)(); ctxAudio.resume(); } catch(e) {}
+    ecrire("admin_son", "1"); majBoutonSon(); bip(); demarrerSurveillance();
+  };
+  $("alarme-ok").onclick = arreterAlarme;
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { garderEcranAllume(); verifierEvenements(); } });
+  majBoutonSon();
 
   jeton = lire("admin_jeton");
   if (jeton) ouvrir();
+  // Après un rechargement de la page, le navigateur exige un nouvel appui pour réactiver le son
+  if (lire("admin_son") === "1") { $("son").textContent = "🔔"; document.addEventListener("click", function une(){ try { ctxAudio = ctxAudio || new (window.AudioContext || window.webkitAudioContext)(); ctxAudio.resume(); } catch(e) {} demarrerSurveillance(); document.removeEventListener("click", une); }, { once:true }); demarrerSurveillance(); }
 </script>
 </body>
 </html>
