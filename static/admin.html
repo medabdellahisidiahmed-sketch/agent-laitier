@@ -187,6 +187,7 @@
   </main>
   <details id="diag" style="max-width:1180px;margin:0 auto;padding:0 14px;color:var(--gris);font-size:13px">
     <summary style="cursor:pointer;padding:8px 0">🔎 Diagnostic (enregistrements vers Google)</summary>
+    <div id="etat-ia" style="padding:4px 0"></div>
     <div id="journal" style="padding:4px 0 8px"></div>
   </details>
   <div id="version" style="text-align:center;color:var(--gris);font-size:12px;padding:8px 0 90px"></div>
@@ -212,6 +213,16 @@
 
   function el(tag, classe, texte){ const e=document.createElement(tag); if(classe) e.className=classe; if(texte!==undefined) e.textContent=texte; return e; }
   function duree(sec){ return sec < 90 ? sec + " s" : (sec < 5400 ? Math.round(sec/60) + " min" : (sec < 172800 ? Math.round(sec/3600) + " h" : Math.round(sec/86400) + " j")); }
+  // Ligne « 📍 quartier · 📞 téléphone » (le numéro est cliquable pour appeler). Le texte reste inséré en textContent.
+  function coordonnees(ligne){
+    const tel = String(ligne.Telephone || "").replace(/\D/g, "");
+    const quartier = String(ligne.Quartier || "").trim();
+    if (!tel && !quartier) return null;
+    const d = el("div","bas");
+    if (quartier) d.appendChild(document.createTextNode("📍 " + quartier + (tel ? " · " : "")));
+    if (tel) { const a = el("a","", "📞 " + tel); a.href = "tel:" + tel; a.style.color = "var(--bleu)"; d.appendChild(a); }
+    return d;
+  }
   function heure(iso){ return (iso||"").replace("T"," ").slice(5,16); }
 
   // Explique clairement pourquoi les données n'arrivent pas
@@ -290,6 +301,11 @@
     };
     $("i-cmd").textContent = info(d.sources.commandes);
     $("i-alt").textContent = info(d.sources.alertes);
+    const ia = d.ia || {};
+    $("etat-ia").textContent = "IA du chat : " + (ia.modele || "pas encore utilisée depuis le démarrage") +
+      " · modèles prévus : " + (ia.modeles||[]).join(" → ") +
+      (ia.requetes_restantes_jour ? " · requêtes restantes aujourd'hui (modèle courant) : " + ia.requetes_restantes_jour : "") +
+      (ia.nb_plafonds ? " · plafond gratuit atteint " + ia.nb_plafonds + " fois, dernier : " + ia.dernier_plafond : " · plafond gratuit jamais atteint");
     const jr = $("journal"); jr.innerHTML = "";
     if (!(d.journal_ecritures||[]).length) jr.appendChild(el("div","vide","Aucune écriture depuis le dernier démarrage du serveur."));
     (d.journal_ecritures||[]).forEach(j => jr.appendChild(el("div","", j.heure + " · " + j.feuille + " · " + j.statut + (j.detail ? " (" + j.detail + ")" : ""))));
@@ -365,6 +381,7 @@
       const l = el("div","ligne");
       const h = el("div","haut"); h.appendChild(el("span","", c.Client || "Client")); h.appendChild(el("span","", nf.format(Number(c["Total MRU"])||0) + " MRU"));
       l.appendChild(h);
+      const co = coordonnees(c); if (co) l.appendChild(co);
       l.appendChild(el("div","bas", heure(c.Date) + (c.Livraison ? " · livraison " + String(c.Livraison).slice(0,10) : "")));
       if (c.Message) l.appendChild(el("div","bas", c.Message));
       lc.appendChild(l);
@@ -377,6 +394,7 @@
       const l = el("div","ligne");
       const h = el("div","haut"); h.appendChild(el("span","", a.Client || "Client")); h.appendChild(el("span","badge " + c[1], c[0]));
       l.appendChild(h);
+      const co2 = coordonnees(a); if (co2) l.appendChild(co2);
       l.appendChild(el("div","bas", heure(a.Date)));
       if (a.Message) l.appendChild(el("div","bas", a.Message));
       la.appendChild(l);

@@ -158,6 +158,19 @@
   #confirmation li { padding:6px 0; border-bottom:1px solid #EEF1F6; }
   #confirmation .total { font-size:20px; font-weight:700; margin:8px 0; }
   #confirmation .liv { color:var(--gris); font-size:14px; margin-bottom:14px; }
+  #compte { margin-left:auto; background:rgba(255,255,255,.18); color:#fff; border:none; border-radius:18px; padding:8px 12px; font-size:13px; max-width:46%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #profil { display:none; position:fixed; inset:0; background:rgba(20,30,50,.75); z-index:60; align-items:center; justify-content:center; padding:20px; overflow-y:auto; }
+  #profil .carte { background:white; border-radius:18px; padding:22px; width:100%; max-width:380px; }
+  #profil h2 { margin:0 0 4px; color:var(--bleu); font-size:22px; text-align:center; }
+  #profil .sous { color:var(--gris); font-size:13px; text-align:center; margin-bottom:14px; }
+  #profil label { display:flex; justify-content:space-between; font-size:14px; font-weight:600; margin:12px 0 4px; }
+  #profil label .ar { direction:rtl; }
+  #profil input { width:100%; padding:14px; border:2px solid #D7DCE5; border-radius:12px; font-size:18px; outline:none; }
+  #profil input:focus { border-color:var(--bleu); }
+  #profil-erreur { color:#C0392B; font-size:14px; min-height:20px; margin-top:8px; text-align:center; }
+  #profil .btns { display:flex; gap:10px; margin-top:6px; }
+  #profil .btns button { flex:1; padding:15px; border:none; border-radius:12px; font-size:17px; font-weight:600; color:white; background:#1E8E4E; }
+  #profil .btns button#profil-annuler { background:#8A93A3; display:none; }
   #confirmation button { width:100%; padding:14px; border:none; border-radius:12px; background:var(--bleu); color:white; font-size:17px; font-weight:600; }
 </style>
 </head>
@@ -169,6 +182,7 @@
       <b>Agent Laitier</b>
       <span>Commandes &amp; questions produits</span>
     </div>
+    <button id="compte" type="button" aria-label="Mon compte">👤</button>
   </header>
 
   <div id="installer">📲 Ajouter cette app à votre écran d'accueil</div>
@@ -209,6 +223,22 @@
     <button id="conf-ok">OK</button>
   </div></div>
 
+  <div id="profil"><div class="carte">
+    <h2>👋 Bienvenue <span lang="ar" dir="rtl">مرحبا</span></h2>
+    <div class="sous">Une seule fois, pour que nous puissions vous livrer.<br>Vos informations servent uniquement à la livraison.</div>
+    <label for="p-nom"><span>🏪 Nom de la boutique</span><span class="ar" lang="ar">اسم المحل</span></label>
+    <input id="p-nom" type="text" autocomplete="organization" maxlength="60">
+    <label for="p-tel"><span>📞 Téléphone</span><span class="ar" lang="ar">الهاتف</span></label>
+    <input id="p-tel" type="tel" inputmode="tel" autocomplete="tel" maxlength="20" placeholder="Ex : 22 33 44 55">
+    <label for="p-quartier"><span>📍 Quartier</span><span class="ar" lang="ar">الحي</span></label>
+    <input id="p-quartier" type="text" autocomplete="off" maxlength="60" placeholder="Ex : Tevragh Zeina">
+    <div id="profil-erreur"></div>
+    <div class="btns">
+      <button id="profil-annuler" type="button">Annuler</button>
+      <button id="profil-ok" type="button">✅ Commencer <span lang="ar" dir="rtl">ابدأ</span></button>
+    </div>
+  </div></div>
+
   <div id="messages"></div>
 
   <form id="saisie">
@@ -223,12 +253,53 @@
   const champTexte = document.getElementById("texte");
   const boutonEnvoyer = document.getElementById("envoyer");
 
-  // Identifiant simple pour cette session de discussion (gardé en mémoire du navigateur)
-  let idClient = sessionStorage.getItem("id_client");
-  if (!idClient) {
-    idClient = "web-" + Math.random().toString(36).slice(2, 10);
-    sessionStorage.setItem("id_client", idClient);
+  // --- Profil du client (nom, téléphone, quartier) : demandé une seule fois, gardé sur le téléphone ---
+  // Chiffres seulement, sans l'indicatif +222 / 00222 (même numéro = même client)
+  const chiffres = (t) => {
+    let c = (t || "").replace(/\D/g, "");
+    if (c.startsWith("00222") && c.length >= 13) c = c.slice(5);
+    else if (c.startsWith("222") && c.length === 11) c = c.slice(3);
+    return c;
+  };
+  function profilValide(p) { return !!p && (p.nom || "").trim().length >= 2 && chiffres(p.tel).length >= 8; }
+  let profil = null;
+  try { profil = JSON.parse(localStorage.getItem("profil") || "null"); } catch (e) {}
+  if (!profilValide(profil)) profil = null;
+  // Identifiant stable : le numéro de téléphone (le même client reste le même d'une visite à l'autre)
+  let idClient = profil ? "c-" + chiffres(profil.tel) : "web-" + Math.random().toString(36).slice(2, 10);
+  const donneesClient = () => profil ? { nom: profil.nom, tel: profil.tel, quartier: profil.quartier || "" } : null;
+
+  const zoneProfil = document.getElementById("profil");
+  function majBoutonCompte() {
+    document.getElementById("compte").textContent = profil ? "👤 " + profil.nom : "👤";
   }
+  function afficherProfil(modifier) {
+    document.getElementById("p-nom").value = profil ? profil.nom : "";
+    document.getElementById("p-tel").value = profil ? profil.tel : "";
+    document.getElementById("p-quartier").value = profil ? (profil.quartier || "") : "";
+    document.getElementById("profil-erreur").textContent = "";
+    document.getElementById("profil-annuler").style.display = (modifier && profil) ? "block" : "none";
+    zoneProfil.style.display = "flex";
+    setTimeout(() => document.getElementById(profil ? "p-tel" : "p-nom").focus(), 50);
+  }
+  document.getElementById("compte").onclick = () => afficherProfil(true);
+  document.getElementById("profil-annuler").onclick = () => { zoneProfil.style.display = "none"; };
+  document.getElementById("profil-ok").onclick = () => {
+    const nouveau = {
+      nom: document.getElementById("p-nom").value.trim(),
+      tel: document.getElementById("p-tel").value.trim(),
+      quartier: document.getElementById("p-quartier").value.trim()
+    };
+    if (nouveau.nom.length < 2) { document.getElementById("profil-erreur").textContent = "Écrivez le nom de votre boutique."; return; }
+    if (chiffres(nouveau.tel).length < 8) { document.getElementById("profil-erreur").textContent = "Écrivez votre numéro de téléphone (8 chiffres)."; return; }
+    profil = nouveau;
+    idClient = "c-" + chiffres(profil.tel);
+    try { localStorage.setItem("profil", JSON.stringify(profil)); } catch (e) {}
+    zoneProfil.style.display = "none";
+    majBoutonCompte();
+  };
+  majBoutonCompte();
+  if (!profil) afficherProfil(false);
 
   function ajouterBulle(texte, auteur) {
     const div = document.createElement("div");
@@ -246,6 +317,7 @@
     e.preventDefault();
     const message = champTexte.value.trim();
     if (!message) return;
+    if (!profil) { afficherProfil(false); return; }
 
     ajouterBulle(message, "client");
     champTexte.value = "";
@@ -256,7 +328,7 @@
       const reponse = await fetch("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id_client: idClient, message: message })
+        body: JSON.stringify({ id_client: idClient, message: message, client: donneesClient() })
       });
       const data = await reponse.json();
       bulleAttente.remove();
@@ -328,6 +400,7 @@
   });
 
   document.getElementById("valider").onclick = () => {
+    if (!profil) { afficherProfil(false); return; }
     const choisis = produits.filter(p => quantites[p.produit] > 0);
     if (!choisis.length) return;
     const ul = document.getElementById("recap-lignes");
@@ -356,7 +429,7 @@
       .map(p => ({ produit: p.produit, quantite: quantites[p.produit] }));
     try {
       const r = await fetch("/commander", { method: "POST", headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ id_client: idClient, lignes, livraison: jourLivraison }) });
+        body: JSON.stringify({ id_client: idClient, lignes, livraison: jourLivraison, client: donneesClient() }) });
       const d = await r.json();
       if (d.ok) {
         const ul = document.getElementById("conf-lignes");
@@ -366,7 +439,7 @@
         document.getElementById("conf-liv").textContent = d.livraison;
         document.getElementById("confirmation").style.display = "flex";
         quantites = {}; dessinerCatalogue();
-      } else { alert(d.message); majTotal(); }
+      } else { alert(d.message); if (d.profil_requis) afficherProfil(false); majTotal(); }
     } catch (e) { alert("Connexion impossible. Réessayez."); majTotal(); }
     bouton.disabled = false;
   };
