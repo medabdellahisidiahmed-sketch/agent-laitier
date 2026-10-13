@@ -66,6 +66,76 @@ ALERTES_WEBHOOK_URL = os.environ.get("ALERTES_WEBHOOK_URL")
 SHEETS_CLE = os.environ.get("SHEETS_CLE", "")
 SEUIL_STOCK_BAS = 20
 
+# Alerte instantanée sur le téléphone du responsable (Telegram : officiel, gratuit).
+# TELEGRAM_CHAT_ID peut contenir plusieurs identifiants séparés par une virgule.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+_etat_notif = {"derniere": "", "ok": None, "erreur": ""}
+
+
+# Alerte par e-mail via le script Apps Script des Commandes (gratuit, aucun nouveau compte).
+# Activée seulement si ALERTE_EMAIL=1 (après avoir collé le nouveau script).
+ALERTE_EMAIL = os.environ.get("ALERTE_EMAIL", "").strip() == "1"
+
+
+def _notifier_email(texte):
+    if not (ALERTE_EMAIL and COMMANDES_WEBHOOK_URL and SHEETS_CLE):
+        return False
+    try:
+        r = requests.post(COMMANDES_WEBHOOK_URL, json={
+            "_action": "alerte", "_cle": SHEETS_CLE,
+            "sujet": texte.split("\n")[0][:120], "texte": texte}, timeout=30)
+        ok, resume = _analyser_reponse_webhook(r)
+        _etat_notif.update(email_ok=ok, email_erreur="" if ok else resume[:150])
+        return ok
+    except Exception as e:
+        _etat_notif.update(email_ok=False, email_erreur=str(e)[:150])
+        print("[NOTIF] erreur e-mail :", e)
+        return False
+
+
+def notifier_responsable(texte):
+    """Envoie l'alerte (e-mail et/ou Telegram). Ne lève jamais d'exception :
+    une alerte qui échoue ne doit jamais empêcher d'enregistrer la commande."""
+    ok_mail = _notifier_email(texte)
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return ok_mail
+    ok_global = ok_mail
+    for chat in [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]:
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat, "text": texte[:3900], "disable_web_page_preview": True},
+                timeout=10)
+            if r.ok:
+                ok_global = True
+                _etat_notif.update(ok=True, erreur="")
+            else:
+                _etat_notif.update(ok=False, erreur=f"HTTP {r.status_code} {r.text[:150]}")
+                print("[NOTIF] refus Telegram :", r.status_code, r.text[:150])
+        except Exception as e:
+            _etat_notif.update(ok=False, erreur=str(e)[:150])
+            print("[NOTIF] erreur Telegram :", e)
+    _etat_notif["derniere"] = datetime.now().isoformat(timespec="seconds")
+    return ok_global
+
+
+def _texte_alerte(type_, client_champs, details, total=None):
+    """Texte court de l'alerte : qui, où, quoi, et un lien WhatsApp direct."""
+    tel = (client_champs.get("Telephone") or "").strip()
+    lignes = [("🛒 NOUVELLE COMMANDE" if type_ == "commande" else "⚠️ À TRAITER (" + type_ + ")"),
+              f"👤 {client_champs.get('Client', '')}"]
+    if client_champs.get("Quartier"):
+        lignes.append(f"📍 {client_champs['Quartier']}")
+    if tel:
+        lignes.append(f"📞 {tel}")
+    lignes.append(details)
+    if total not in (None, ""):
+        lignes.append(f"💰 {total} MRU")
+    if tel:
+        lignes.append(f"💬 WhatsApp : https://wa.me/{tel if len(tel) > 8 else '222' + tel}")
+    return "\n".join(lignes)
+
 
 # ============================================================
 # 2. LECTURE / ÉCRITURE DU STOCK
@@ -317,11 +387,34 @@ def ajouter_ligne(fichier, donnees, webhook_url=None):
 _pool_ecriture = ThreadPoolExecutor(max_workers=4)
 
 
-def ajouter_ligne_arriere_plan(fichier, donnees, webhook_url=None):
+_evenements = []  # 20 derniers événements (commande / à traiter) pour l'alarme sonore du tableau de bord
+_verrou_evt = threading.Lock()
+
+
+def noter_evenement(texte):
+    """Mémorise l'événement en mémoire : le tableau de bord le voit en quelques
+    secondes, sans attendre Google Sheets."""
+    with _verrou_evt:
+        ident = int(time.time() * 1000)
+        if _evenements and ident <= _evenements[-1]["id"]:
+            ident = _evenements[-1]["id"] + 1
+        _evenements.append({"id": ident, "type": "commande" if texte.startswith("🛒") else "alerte",
+                            "heure": datetime.now().strftime("%H:%M"), "texte": texte[:600]})
+        del _evenements[:-20]
+
+
+def ajouter_ligne_arriere_plan(fichier, donnees, webhook_url=None, alerte=None):
     """Enregistre la ligne dans Google Sheets SANS faire attendre le client :
     la réponse part tout de suite, l'écriture se termine en arrière-plan
-    (avec le même secours local en cas d'échec)."""
+    (avec le même secours local en cas d'échec). Si `alerte` est fourni,
+    le responsable est prévenu sur Telegram AVANT l'écriture (plus rapide,
+    et indépendant de Google)."""
+    if alerte:
+        noter_evenement(alerte)
+
     def tache():
+        if alerte:
+            notifier_responsable(alerte)
         try:
             ajouter_ligne(fichier, donnees, webhook_url=webhook_url)
             lancer_rafraichissement(webhook_url, fichier)  # le tableau de bord verra la nouvelle ligne
@@ -578,20 +671,24 @@ def generer_reponse(identifiant_client, texte_client, client=None):
     print(f"[IA] categorie={categorie} | escalade={escalade} | "
           f"commande_structuree={'oui' if commande else 'NON (rien à enregistrer)'}")
 
+    champs = _champs_client(identifiant_client, client)
     if escalade:
         ajouter_ligne_arriere_plan(ALERTES_FILE, {
-            **_champs_client(identifiant_client, client),
+            **champs,
             "Categorie": categorie,
             "Message": texte_client,
             "Reponse": reponse_client,
-        }, webhook_url=ALERTES_WEBHOOK_URL)
+        }, webhook_url=ALERTES_WEBHOOK_URL,
+            alerte=_texte_alerte(categorie, champs, "💬 " + texte_client[:500]))
     elif commande:
+        total_ia = commande.get("total_commande_mru", "")
         ajouter_ligne_arriere_plan(COMMANDES_FILE, {
-            **_champs_client(identifiant_client, client),
+            **champs,
             "Message": texte_client,
-            "Total MRU": commande.get("total_commande_mru", ""),
+            "Total MRU": total_ia,
             "Livraison": commande.get("date_livraison_souhaitee", ""),
-        }, webhook_url=COMMANDES_WEBHOOK_URL)
+        }, webhook_url=COMMANDES_WEBHOOK_URL,
+            alerte=_texte_alerte("commande", champs, "📝 " + texte_client[:500], total_ia))
 
     return resultat
 
@@ -896,12 +993,15 @@ def commander():
         return jsonify({"ok": False, "message": "Aucun produit choisi."}), 200
 
     date_liv = datetime.now() + timedelta(days=0 if jour == "aujourdhui" else 1)
+    champs = _champs_client(id_client, client)
     ajouter_ligne_arriere_plan(COMMANDES_FILE, {
-        **_champs_client(id_client, client),
+        **champs,
         "Message": "Catalogue : " + " ; ".join(resume),
         "Total MRU": total,
         "Livraison": date_liv.strftime("%Y-%m-%d"),
-    }, webhook_url=COMMANDES_WEBHOOK_URL)
+    }, webhook_url=COMMANDES_WEBHOOK_URL,
+        alerte=_texte_alerte("commande", champs,
+                             "🧾 " + "\n🧾 ".join(resume) + "\n🚚 Livraison : " + date_liv.strftime("%Y-%m-%d"), total))
     print(f"[CATALOGUE] commande {client['nom']} ({client['tel']}) total={total}")
     return jsonify({"ok": True, "total": total, "resume": resume,
                     "livraison": date_liv.strftime("%Y-%m-%d")}), 200
@@ -1064,7 +1164,31 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-13b"
+VERSION = "2026-10-13f"
+
+
+@app.route("/admin/api/evenements", methods=["GET"])
+def api_evenements():
+    """Très léger (aucune lecture Google) : interrogé toutes les ~10 s par
+    le tableau de bord pour déclencher l'alarme sonore."""
+    if not _admin_ok():
+        return jsonify({"ok": False}), 401
+    with _verrou_evt:
+        liste = list(_evenements)
+    return jsonify({"ok": True, "evenements": liste}), 200
+
+
+@app.route("/admin/api/test-notif", methods=["POST"])
+def api_test_notif():
+    """Envoie une alerte de test (bouton du tableau de bord)."""
+    if not _admin_ok():
+        return jsonify({"ok": False, "message": "Accès refusé"}), 401
+    if not (ALERTE_EMAIL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)):
+        return jsonify({"ok": False, "message":
+            "Aucune alerte configurée : ajoutez ALERTE_EMAIL=1 sur Render (après avoir mis à jour le script Google)."}), 200
+    ok = notifier_responsable("✅ Test d'alerte : si vous lisez ceci, vous serez prévenu à chaque commande.")
+    return jsonify({"ok": ok, "message": "Alerte envoyée : regardez votre boîte e-mail (et les spams)." if ok
+                    else "Échec : " + (_etat_notif.get("email_erreur") or _etat_notif.get("erreur") or "inconnu")}), 200
 _heure_lectures = {}  # clé -> heure de départ de la lecture en cours
 
 
@@ -1174,6 +1298,16 @@ def _jour(valeur):
     return str(valeur or "")[:10]
 
 
+def _colonnes_manquantes(resultat, attendues):
+    """Colonnes que le Google Sheet ne contient pas (en-têtes absents de la ligne 1)."""
+    if resultat.get("source") != "sheets" or resultat.get("erreur") or resultat.get("chargement") or not resultat.get("lignes"):
+        return []
+    presentes = set()
+    for ligne in resultat["lignes"][-5:]:
+        presentes |= set(ligne.keys())
+    return [c for c in attendues if c not in presentes]
+
+
 @app.route("/admin/api/dashboard", methods=["GET"])
 def api_dashboard():
     if not _admin_ok():
@@ -1239,9 +1373,11 @@ def api_dashboard():
         "sources": {
             "commandes": {"source": cmd["source"], "erreur": cmd["erreur"], "chargement": bool(cmd.get("chargement")),
                           "age": cmd.get("age"), "avertissement": cmd.get("avertissement"), "en_cours": bool(cmd.get("en_cours")),
+                          "colonnes_manquantes": _colonnes_manquantes(cmd, ["Telephone", "Quartier"]),
                           **stats(commandes, locales_cmd)},
             "alertes": {"source": alt["source"], "erreur": alt["erreur"], "chargement": bool(alt.get("chargement")),
                         "age": alt.get("age"), "avertissement": alt.get("avertissement"), "en_cours": bool(alt.get("en_cours")),
+                        "colonnes_manquantes": _colonnes_manquantes(alt, ["Telephone", "Quartier"]),
                         **stats(alertes, locales_alt)},
         },
         "kpi": {
@@ -1262,6 +1398,8 @@ def api_dashboard():
         "stock_resume": stock_resume,
         "journal_ecritures": list(reversed(_journal_ecritures)),
         "ia": dict(_etat_ia, modeles=[GROQ_MODEL] + [m for m in MODELES_SECOURS if m != GROQ_MODEL]),
+        "notif": dict(_etat_notif, configure=bool(ALERTE_EMAIL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)),
+                      email=ALERTE_EMAIL, telegram=bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)),
     }), 200
 
 
