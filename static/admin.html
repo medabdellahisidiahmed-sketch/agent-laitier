@@ -6,6 +6,10 @@
 <title>Tableau de bord</title>
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="#1B4D8C">
+<link rel="manifest" href="/static/manifest-admin.json">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <style>
   :root {
     --bleu:#1B4D8C; --bleu-clair:#E8F0FB; --fond:#F4F6FA; --texte:#1E2430;
@@ -118,6 +122,8 @@
   @keyframes flash { 0%,60% { box-shadow:0 0 0 3px var(--bleu); } 100% { box-shadow:0 0 0 0 transparent; } }
   .flash { animation:flash 1.6s ease-out; }
   #alarme { position:sticky; top:0; z-index:20; background:var(--rouge); color:#fff; padding:12px 14px; display:flex; gap:12px; align-items:center; justify-content:space-between; animation:clignote 1s steps(2) infinite; }
+  #avis-install { background:#E6F4EA; color:var(--vert); padding:10px 14px; font-size:14px; display:flex; gap:10px; align-items:center; justify-content:space-between; }
+  #avis-install button { flex:none; background:var(--vert); color:#fff; border:none; border-radius:10px; padding:10px 14px; font-weight:700; font-size:14px; }
   #avis-push { background:var(--bleu-clair); color:var(--bleu); padding:10px 14px; font-size:14px; display:flex; gap:10px; align-items:center; justify-content:space-between; }
   #avis-push button { flex:none; background:var(--bleu); color:#fff; border:none; border-radius:10px; padding:10px 14px; font-weight:700; font-size:14px; }
   #avis-son { background:#FFF1DB; color:var(--orange); padding:10px 14px; font-size:14px; text-align:center; }
@@ -149,6 +155,10 @@
       <button id="actualiser" aria-label="Actualiser">↻ Actualiser</button>
     </div>
   </header>
+  <div id="avis-install" hidden>
+    <span>📲 Installez le tableau de bord comme une application : l'alarme sonne sans avoir à toucher l'écran.</span>
+    <button id="btn-install" type="button">Installer</button>
+  </div>
   <div id="avis-push" hidden>
     <span id="avis-push-texte">📲 Recevez les commandes même téléphone verrouillé.</span>
     <button id="btn-push" type="button">Activer</button>
@@ -565,6 +575,7 @@
     document.addEventListener(ev, () => { if (lire("admin_son") === "1" && !sonPret()) debloquerSon(); }, { passive: true }));
   function bip(){
     try {
+      if (!ctxAudio) { try { ctxAudio = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {} }
       if (!ctxAudio) { majAvisSon(); return; }
       if (ctxAudio.state !== "running") { ctxAudio.resume(); majAvisSon(); }
       [0, 0.28, 0.56].forEach(dec => {
@@ -643,19 +654,24 @@
       body: corps ? JSON.stringify(corps) : undefined }).then(r => r.json());
   }
   let cleVapid = "";
+  function avisPush(texte, avecBouton){
+    $("avis-push-texte").textContent = texte; $("btn-push").hidden = !avecBouton; $("avis-push").hidden = false;
+  }
   async function etatPush(){
     const avis = $("avis-push");
     try {
       const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
       const installee = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
       if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
-        if (ios && !installee) { $("avis-push-texte").textContent = "📲 Sur iPhone : touchez Partager puis « Sur l'écran d'accueil », et ouvrez le tableau de bord depuis cette icône pour activer les notifications."; $("btn-push").hidden = true; avis.hidden = false; }
-        else avis.hidden = true;
+        avisPush(ios && !installee
+          ? "📲 Sur iPhone : touchez Partager puis « Sur l'écran d'accueil », et ouvrez le tableau de bord depuis cette icône pour activer les notifications."
+          : "📲 Ce navigateur ne permet pas les notifications. Ouvrez le tableau de bord dans Chrome (et non dans WhatsApp, Telegram ou Facebook).", false);
         return;
       }
+      if (!window.isSecureContext) { avisPush("📲 Les notifications exigent une adresse en https.", false); return; }
       const rep = await appelPush("/admin/api/push-cle");
       cleVapid = rep.cle || "";
-      if (!cleVapid) { avis.hidden = true; return; }           // non configuré sur le serveur : on n'affiche rien
+      if (!cleVapid) { avis.hidden = true; return; }           // non configuré sur le serveur : on n'affiche rien (voir Diagnostic)
       const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
       await navigator.serviceWorker.ready;
       const abo = await reg.pushManager.getSubscription();
@@ -663,12 +679,10 @@
         appelPush("/admin/api/abonner", abo.toJSON());          // le serveur peut avoir redémarré : on lui redonne l'abonnement
         avis.hidden = true; return;
       }
-      $("avis-push-texte").textContent = Notification.permission === "denied"
-        ? "🔕 Notifications bloquées : autorisez-les dans les réglages du navigateur pour ce site."
-        : "📲 Recevez les commandes même téléphone verrouillé.";
-      $("btn-push").hidden = Notification.permission === "denied";
-      avis.hidden = false;
-    } catch(e) { avis.hidden = true; }
+      if (Notification.permission === "denied")
+        avisPush("🔕 Notifications bloquées : touchez le cadenas à côté de l'adresse > Autorisations > Notifications > Autoriser, puis rechargez la page.", false);
+      else avisPush("📲 Recevez les commandes même téléphone verrouillé.", true);
+    } catch(e) { avisPush("⚠ Notifications indisponibles : " + (e && e.message ? e.message : e), false); }
   }
   $("btn-push").onclick = async () => {
     const b = $("btn-push"); b.disabled = true;
@@ -687,8 +701,29 @@
 
   jeton = lire("admin_jeton");
   if (jeton) { ouvrir(); etatPush(); }
-  // Après un rechargement, le navigateur exige un nouvel appui pour le son : on l'affiche clairement
-  if (lire("admin_son") === "1") { demarrerSurveillance(); majAvisSon(); }
+
+  // ---------- Installation comme application (le son n'exige plus de toucher l'écran) ----------
+  let invitationInstall = null;
+  const dejaInstallee = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault(); invitationInstall = e;
+    if (!dejaInstallee()) $("avis-install").hidden = false;
+  });
+  window.addEventListener("appinstalled", () => { $("avis-install").hidden = true; invitationInstall = null; });
+  $("btn-install").onclick = async () => {
+    if (!invitationInstall) return;
+    invitationInstall.prompt();
+    try { await invitationInstall.userChoice; } catch(e) {}
+    invitationInstall = null; $("avis-install").hidden = true;
+  };
+  // Application installée : Chrome autorise le son sans toucher l'écran. On essaie dès l'ouverture.
+  function essayerSonAutomatique(){
+    if (lire("admin_son") !== "1") return;
+    try { ctxAudio = ctxAudio || new (window.AudioContext || window.webkitAudioContext)(); if (ctxAudio.state === "suspended") ctxAudio.resume().then(majAvisSon, majAvisSon); } catch(e) {}
+    majAvisSon();
+  }
+  // Si le navigateur exige un appui pour le son, on l'affiche clairement
+  if (lire("admin_son") === "1") { demarrerSurveillance(); essayerSonAutomatique(); }
 </script>
 </body>
 </html>
