@@ -118,6 +118,8 @@
   @keyframes flash { 0%,60% { box-shadow:0 0 0 3px var(--bleu); } 100% { box-shadow:0 0 0 0 transparent; } }
   .flash { animation:flash 1.6s ease-out; }
   #alarme { position:sticky; top:0; z-index:20; background:var(--rouge); color:#fff; padding:12px 14px; display:flex; gap:12px; align-items:center; justify-content:space-between; animation:clignote 1s steps(2) infinite; }
+  #avis-push { background:var(--bleu-clair); color:var(--bleu); padding:10px 14px; font-size:14px; display:flex; gap:10px; align-items:center; justify-content:space-between; }
+  #avis-push button { flex:none; background:var(--bleu); color:#fff; border:none; border-radius:10px; padding:10px 14px; font-weight:700; font-size:14px; }
   #avis-son { background:#FFF1DB; color:var(--orange); padding:10px 14px; font-size:14px; text-align:center; }
   #alarme-texte { white-space:pre-line; font-size:14px; line-height:1.4; max-height:30vh; overflow:auto; }
   #alarme button { flex:none; background:#fff; color:var(--rouge); border:none; border-radius:10px; padding:12px 14px; font-weight:700; font-size:15px; }
@@ -147,6 +149,10 @@
       <button id="actualiser" aria-label="Actualiser">↻ Actualiser</button>
     </div>
   </header>
+  <div id="avis-push" hidden>
+    <span id="avis-push-texte">📲 Recevez les commandes même téléphone verrouillé.</span>
+    <button id="btn-push" type="button">Activer</button>
+  </div>
   <div id="avis-son" hidden>🔈 Touchez l'écran une fois pour activer le son de l'alarme.</div>
   <div id="alarme" hidden role="alert">
     <div id="alarme-texte"></div>
@@ -200,6 +206,7 @@
   </main>
   <details id="diag" style="max-width:1180px;margin:0 auto;padding:0 14px;color:var(--gris);font-size:13px">
     <summary style="cursor:pointer;padding:8px 0">🔎 Diagnostic (enregistrements vers Google)</summary>
+    <div style="padding:4px 0" id="etat-push"></div>
     <div style="padding:4px 0"><span id="etat-notif"></span>
       <button id="btn-notif" type="button" style="margin-left:6px;padding:4px 10px;border:1px solid var(--gris);border-radius:8px;background:none;color:inherit;cursor:pointer">Tester l'alerte</button></div>
     <div id="etat-ia" style="padding:4px 0"></div>
@@ -345,6 +352,9 @@
       " · modèles prévus : " + (ia.modeles||[]).join(" → ") +
       (ia.requetes_restantes_jour ? " · requêtes restantes aujourd'hui (modèle courant) : " + ia.requetes_restantes_jour : "") +
       (ia.nb_plafonds ? " · plafond gratuit atteint " + ia.nb_plafonds + " fois, dernier : " + ia.dernier_plafond : " · plafond gratuit jamais atteint");
+    const pu = d.push || {};
+    $("etat-push").textContent = "Notifications téléphone : " + (!pu.configure ? "non configurées sur le serveur (clés VAPID absentes)"
+      : pu.appareils + " appareil(s) abonné(s)" + (pu.ok === false ? " · dernier envoi ÉCHOUÉ (" + pu.erreur + ")" : pu.ok ? " · dernier envoi réussi" : ""));
     const nt = d.notif || {};
     $("etat-notif").textContent = "Alerte " + [nt.email ? "e-mail" : "", nt.telegram ? "Telegram" : ""].filter(Boolean).join(" + ") + " : " + (!nt.configure ? "non configurée"
       : (nt.email_ok === false || nt.ok === false) ? "dernier envoi ÉCHOUÉ (" + (nt.email_erreur || nt.erreur) + ")"
@@ -519,7 +529,7 @@
       if (res.statut === 401) jeton = "";
       return;
     }
-    ecrire("admin_jeton", jeton); $("mdp").value = ""; ouvrir(res.donnees);
+    ecrire("admin_jeton", jeton); $("mdp").value = ""; ouvrir(res.donnees); etatPush();
   }
   $("voir").onclick = () => { const m = $("mdp"); const cache = m.type === "password"; m.type = cache ? "text" : "password"; $("voir").textContent = cache ? "🙈" : "👁"; };
   $("entrer").onclick = entrer;
@@ -577,6 +587,7 @@
     try { if (navigator.wakeLock && lire("admin_son") === "1" && !document.hidden) verrouEcran = await navigator.wakeLock.request("screen"); } catch(e) {}
   }
   function arreterAlarme(){
+    fetch("/admin/api/vu", { method:"POST", headers:{ "X-Admin-Token": jeton } }).catch(() => {});   // arrête les rappels de notification
     clearInterval(minuteurAlarme); minuteurAlarme = null;
     $("alarme").hidden = true; document.title = "Tableau de bord";
     if (nouveaux.length) { ecrire("admin_evt_vu", String(Math.max.apply(null, nouveaux.map(e => e.id)))); }
@@ -618,8 +629,64 @@
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { garderEcranAllume(); verifierEvenements(); } });
   majBoutonSon();
 
+
+  // ---------- Notifications téléphone (fonctionnent application fermée, écran verrouillé) ----------
+  function cleVersTableau(b64){
+    const rempli = (b64 + "=".repeat((4 - b64.length % 4) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+    const brut = atob(rempli); const sortie = new Uint8Array(brut.length);
+    for (let i = 0; i < brut.length; i++) sortie[i] = brut.charCodeAt(i);
+    return sortie;
+  }
+  function appelPush(chemin, corps){
+    return fetch(chemin, { method: corps ? "POST" : "GET", cache:"no-store",
+      headers: Object.assign({ "X-Admin-Token": jeton }, corps ? { "Content-Type":"application/json" } : {}),
+      body: corps ? JSON.stringify(corps) : undefined }).then(r => r.json());
+  }
+  let cleVapid = "";
+  async function etatPush(){
+    const avis = $("avis-push");
+    try {
+      const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+      const installee = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+      if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+        if (ios && !installee) { $("avis-push-texte").textContent = "📲 Sur iPhone : touchez Partager puis « Sur l'écran d'accueil », et ouvrez le tableau de bord depuis cette icône pour activer les notifications."; $("btn-push").hidden = true; avis.hidden = false; }
+        else avis.hidden = true;
+        return;
+      }
+      const rep = await appelPush("/admin/api/push-cle");
+      cleVapid = rep.cle || "";
+      if (!cleVapid) { avis.hidden = true; return; }           // non configuré sur le serveur : on n'affiche rien
+      const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      await navigator.serviceWorker.ready;
+      const abo = await reg.pushManager.getSubscription();
+      if (abo && Notification.permission === "granted") {
+        appelPush("/admin/api/abonner", abo.toJSON());          // le serveur peut avoir redémarré : on lui redonne l'abonnement
+        avis.hidden = true; return;
+      }
+      $("avis-push-texte").textContent = Notification.permission === "denied"
+        ? "🔕 Notifications bloquées : autorisez-les dans les réglages du navigateur pour ce site."
+        : "📲 Recevez les commandes même téléphone verrouillé.";
+      $("btn-push").hidden = Notification.permission === "denied";
+      avis.hidden = false;
+    } catch(e) { avis.hidden = true; }
+  }
+  $("btn-push").onclick = async () => {
+    const b = $("btn-push"); b.disabled = true;
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") { await etatPush(); b.disabled = false; return; }
+      const reg = await navigator.serviceWorker.ready;
+      const abo = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: cleVersTableau(cleVapid) });
+      const r = await appelPush("/admin/api/abonner", abo.toJSON());
+      $("avis-push-texte").textContent = r.ok ? "✅ Notifications activées sur cet appareil." : "⚠ " + (r.message || "Échec de l'activation");
+      b.hidden = true; if (r.ok) setTimeout(() => { $("avis-push").hidden = true; }, 3000);
+      charger(true, true);
+    } catch(e) { $("avis-push-texte").textContent = "⚠ Impossible d'activer : " + e; }
+    b.disabled = false;
+  };
+
   jeton = lire("admin_jeton");
-  if (jeton) ouvrir();
+  if (jeton) { ouvrir(); etatPush(); }
   // Après un rechargement, le navigateur exige un nouvel appui pour le son : on l'affiche clairement
   if (lire("admin_son") === "1") { demarrerSurveillance(); majAvisSon(); }
 </script>
