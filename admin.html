@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tableau de bord</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#1B4D8C">
+<style>
+  :root {
+    --bleu:#1B4D8C; --bleu-clair:#E8F0FB; --fond:#F4F6FA; --texte:#1E2430;
+    --gris:#5B6B86; --bord:#E3E7EF; --vert:#1E8E4E; --rouge:#B3372B; --orange:#B26B00;
+    color-scheme: light;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif; background:var(--fond); color:var(--texte); }
+  header { background:var(--bleu); color:#fff; padding:14px 16px; padding-top:calc(14px + env(safe-area-inset-top,0px)); display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:5; }
+  header b { font-size:17px; }
+  header small { display:block; font-size:12px; opacity:.85; }
+  header button { background:rgba(255,255,255,.18); color:#fff; border:none; border-radius:10px; padding:10px 14px; font-size:15px; }
+  main { max-width:1180px; margin:0 auto; padding:12px 12px calc(84px + env(safe-area-inset-bottom,0px)); }
+  /* Téléphone : une seule section visible à la fois (onglets en bas) */
+  .section { display:none; }
+  .section.actif { display:block; }
+  #onglets-bas { position:fixed; left:0; right:0; bottom:0; z-index:6; display:flex; background:#fff; border-top:1px solid var(--bord); padding-bottom:env(safe-area-inset-bottom,0px); }
+  #onglets-bas button { flex:1; border:none; background:none; padding:9px 2px 8px; font-size:12px; color:var(--gris); position:relative; }
+  #onglets-bas button .ico { display:block; font-size:20px; line-height:1.2; }
+  #onglets-bas button.actif { color:var(--bleu); font-weight:700; }
+  #onglets-bas button.actif::before { content:""; position:absolute; top:0; left:25%; right:25%; height:3px; background:var(--bleu); border-radius:0 0 3px 3px; }
+  #onglets-bas .pastille { position:absolute; top:3px; left:calc(50% + 6px); min-width:18px; height:18px; border-radius:9px; background:var(--rouge); color:#fff; font-size:11px; line-height:18px; font-weight:700; padding:0 4px; }
+  /* Grand écran ou paysage : tout est visible en colonnes, plus d'onglets */
+  @media (min-width: 760px) {
+    #onglets-bas { display:none; }
+    main { padding-bottom:24px; display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:start; }
+    main > .section { display:block; }
+    main > #avertissements { grid-column:1 / -1; }
+    main > #s-accueil { display:contents; }
+    #bloc-kpi { grid-column:1 / -1; grid-template-columns:2fr 1fr 1fr; }
+    #bloc-kpi .kpi.hero { grid-column:auto; }
+    #c-todo { grid-column:1 / -1; }
+    #liens { grid-column:1 / -1; }
+    .carte { margin-bottom:0; }
+  }
+  @media (min-width: 1100px) {
+    main { grid-template-columns:1fr 1fr 1fr; }
+    #c-stock { grid-column:span 1; }
+    #c-graphe { grid-column:span 2; }
+    #liens { grid-column:auto !important; grid-template-columns:1fr; align-content:start; margin-top:0 !important; }
+  }
+  /* Stock en tuiles : 2 colonnes pour gagner de la hauteur */
+  #l-stock { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  #l-stock .ligne { border:1px solid var(--bord); border-radius:12px; padding:8px 10px; }
+  #l-stock .ligne .haut { flex-direction:column; gap:4px; font-size:13px; }
+  #l-stock .ligne .bas { font-size:12px; }
+  #l-stock .vide { grid-column:1 / -1; }
+  .grille { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px; }
+  .kpi { background:#fff; border:1px solid var(--bord); border-radius:14px; padding:12px; }
+  .kpi .label { font-size:12px; color:var(--gris); }
+  .kpi .valeur { font-size:24px; font-weight:700; margin-top:2px; }
+  .kpi .sous { font-size:12px; color:var(--gris); margin-top:2px; }
+  .carte { background:#fff; border:1px solid var(--bord); border-radius:14px; padding:12px; margin-bottom:12px; }
+  .carte h2 { font-size:15px; margin:0 0 10px; }
+  .barres { display:flex; align-items:flex-end; gap:6px; height:140px; padding-top:18px; }
+  .col { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; min-width:0; }
+  .col .barre { width:100%; background:var(--bleu); border-radius:6px 6px 0 0; min-height:2px; }
+  .col.auj .barre { background:var(--vert); }
+  .col .v { font-size:10px; color:var(--gris); margin-bottom:2px; white-space:nowrap; }
+  .col .j { font-size:11px; color:var(--gris); margin-top:4px; }
+  .ligne { padding:10px 0; border-top:1px solid var(--bord); }
+  .ligne:first-of-type { border-top:none; }
+  .ligne .haut { display:flex; justify-content:space-between; gap:8px; font-size:14px; font-weight:600; }
+  .ligne .bas { font-size:13px; color:var(--gris); margin-top:2px; word-break:break-word; }
+  .badge { display:inline-block; font-size:11px; font-weight:600; border-radius:999px; padding:2px 8px; background:var(--bleu-clair); color:var(--bleu); }
+  .badge.rouge { background:#FBE9E7; color:var(--rouge); }
+  .badge.orange { background:#FFF1DB; color:var(--orange); }
+  .niveau { height:8px; background:#E8EDF5; border-radius:999px; margin-top:6px; overflow:hidden; }
+  .niveau i { display:block; height:100%; border-radius:999px; background:var(--vert); }
+  .niveau i.bas { background:#D98A00; } .niveau i.rupture { background:var(--rouge); }
+  .badge.vert { background:#E3F4EA; color:var(--vert); }
+  .resume-stock { font-size:13px; color:var(--gris); margin:-4px 0 8px; }
+  :root { --vert-txt:#176B3A; }
+  .kpi { text-align:left; font:inherit; color:inherit; width:100%; cursor:pointer; display:block; }
+  .kpi:active { background:#F0F4FA; }
+  .kpi.hero { grid-column:1 / -1; border-color:#C9DBF3; background:linear-gradient(180deg,#fff,#F3F8FF); }
+  .kpi.hero .valeur { font-size:40px; line-height:1.1; letter-spacing:-.5px; }
+  .delta { display:inline-block; font-size:13px; font-weight:700; margin-top:4px; padding:2px 8px; border-radius:999px; background:#EEF1F6; color:var(--gris); }
+  .delta.haut { background:#E3F4EA; color:var(--vert-txt); }
+  .delta.bas { background:#FBE9E7; color:var(--rouge); }
+  .squelette { color:transparent !important; background:linear-gradient(90deg,#E8EDF5,#F4F6FA,#E8EDF5); background-size:200% 100%; animation:brille 1.2s linear infinite; border-radius:8px; min-width:70px; display:inline-block; }
+  @keyframes brille { to { background-position:-200% 0; } }
+  @media (prefers-reduced-motion: reduce) { .squelette { animation:none; } }
+  .todo { display:flex; align-items:center; gap:10px; width:100%; min-height:52px; padding:8px 4px; border:none; border-top:1px solid var(--bord); background:none; text-align:left; font:inherit; color:inherit; cursor:pointer; }
+  .todo:first-of-type { border-top:none; }
+  .todo .pic { font-size:22px; width:30px; text-align:center; flex-shrink:0; }
+  .todo .txt { flex:1; font-size:14.5px; line-height:1.3; }
+  .todo .txt small { display:block; color:var(--gris); font-size:12.5px; }
+  .todo .chev { color:var(--gris); font-size:22px; }
+  .todo.ok { cursor:default; color:var(--vert-txt); font-weight:600; }
+  .bar-btn { border:none; background:none; padding:0; font:inherit; cursor:pointer; }
+  .col.choisi .barre { outline:2px solid var(--texte); outline-offset:1px; }
+  #detail-barre { font-size:13px; color:var(--gris); min-height:20px; margin-top:8px; text-align:center; }
+  .reessayer { background:none; border:1px solid currentColor; color:inherit; border-radius:8px; padding:6px 10px; margin-left:8px; font:inherit; }
+  .vide { color:var(--gris); font-size:14px; padding:6px 0; }
+  .alerte-source { background:#FFF1DB; color:var(--orange); border-radius:12px; padding:10px 12px; font-size:13px; margin-bottom:12px; }
+  .liens { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .liens a { display:block; text-align:center; text-decoration:none; background:var(--bleu); color:#fff; border-radius:12px; padding:14px 8px; font-weight:600; font-size:15px; }
+  .liens a.sec { background:#5B6B86; }
+  /* connexion */
+  #connexion { max-width:360px; margin:12vh auto 0; padding:0 16px; }
+  #connexion .carte { padding:20px; }
+  .champ-mdp { position:relative; }
+  #connexion .champ-mdp input { padding-right:56px; }
+  #connexion #voir { position:absolute; right:4px; top:14px; width:46px; height:46px; margin:0; background:none; color:var(--gris); font-size:20px; }
+  #connexion input { width:100%; padding:13px; border:1px solid #D7DCE5; border-radius:10px; font-size:16px; margin:10px 0; }
+  #connexion button { width:100%; padding:14px; border:none; border-radius:12px; background:var(--bleu); color:#fff; font-size:16px; font-weight:600; }
+  #erreur { color:var(--rouge); font-size:14px; min-height:20px; }
+  [hidden] { display:none !important; }
+  @keyframes flash { 0%,60% { box-shadow:0 0 0 3px var(--bleu); } 100% { box-shadow:0 0 0 0 transparent; } }
+  .flash { animation:flash 1.6s ease-out; }
+  #alarme { position:sticky; top:0; z-index:20; background:var(--rouge); color:#fff; padding:12px 14px; display:flex; gap:12px; align-items:center; justify-content:space-between; animation:clignote 1s steps(2) infinite; }
+  #avis-push { background:var(--bleu-clair); color:var(--bleu); padding:10px 14px; font-size:14px; display:flex; gap:10px; align-items:center; justify-content:space-between; }
+  #avis-push button { flex:none; background:var(--bleu); color:#fff; border:none; border-radius:10px; padding:10px 14px; font-weight:700; font-size:14px; }
+  #avis-son { background:#FFF1DB; color:var(--orange); padding:10px 14px; font-size:14px; text-align:center; }
+  #alarme-texte { white-space:pre-line; font-size:14px; line-height:1.4; max-height:30vh; overflow:auto; }
+  #alarme button { flex:none; background:#fff; color:var(--rouge); border:none; border-radius:10px; padding:12px 14px; font-weight:700; font-size:15px; }
+  @keyframes clignote { 50% { background:#E0554A; } }
+</style>
+</head>
+<body>
+
+<div id="connexion">
+  <div class="carte">
+    <h2 style="font-size:19px">🔒 Espace gestion</h2>
+    <div style="color:var(--gris);font-size:14px">Entrez le mot de passe administrateur.</div>
+    <div class="champ-mdp">
+      <input id="mdp" type="password" placeholder="Mot de passe" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go">
+      <button id="voir" type="button" aria-label="Afficher le mot de passe">👁</button>
+    </div>
+    <div id="erreur"></div>
+    <button id="entrer">Entrer</button>
+  </div>
+</div>
+
+<div id="tableau" hidden>
+  <header>
+    <div><b>📊 Tableau de bord</b><small id="maj">…</small></div>
+    <div style="display:flex;gap:8px">
+      <button id="son" aria-label="Alarme sonore" title="Alarme sonore à chaque nouvelle commande">🔕</button>
+      <button id="actualiser" aria-label="Actualiser">↻ Actualiser</button>
+    </div>
+  </header>
+  <div id="avis-push" hidden>
+    <span id="avis-push-texte">📲 Recevez les commandes même téléphone verrouillé.</span>
+    <button id="btn-push" type="button">Activer</button>
+  </div>
+  <div id="avis-son" hidden>🔈 Touchez l'écran une fois pour activer le son de l'alarme.</div>
+  <div id="alarme" hidden role="alert">
+    <div id="alarme-texte"></div>
+    <button id="alarme-ok" type="button">✔ J'ai vu</button>
+  </div>
+  <main>
+    <div id="avertissements"></div>
+
+    <section class="section actif" id="s-accueil">
+      <div class="grille" id="bloc-kpi">
+        <button class="kpi hero" data-go="commandes" aria-label="Ventes aujourd'hui, ouvrir les commandes">
+          <div class="label">Ventes aujourd'hui (MRU)</div>
+          <div class="valeur" id="k-tot">–</div>
+          <div class="delta" id="k-delta"></div>
+          <div class="sous" id="k-cmd-liv"></div>
+        </button>
+        <button class="kpi" data-go="commandes">
+          <div class="label">Ventes 7 jours (MRU)</div><div class="valeur" id="k-7j">–</div><div class="sous" id="k-nb7"></div>
+        </button>
+        <button class="kpi" data-go="alertes">
+          <div class="label">Alertes (7 jours)</div><div class="valeur" id="k-alt">–</div><div class="sous" id="k-cat"></div>
+        </button>
+      </div>
+      <div class="carte" id="c-todo"><h2>À traiter</h2><div id="l-todo"></div></div>
+      <div class="carte" id="c-graphe">
+        <h2>Ventes des 7 derniers jours (MRU)</h2>
+        <div class="barres" id="graphe" role="group" aria-label="Ventes par jour sur 7 jours"></div>
+        <div id="detail-barre">Touchez une barre pour voir le détail.</div>
+      </div>
+      <div class="liens" id="liens" style="margin-top:12px">
+        <a id="lien-produits" href="#">🛠 Gérer les produits</a>
+        <a class="sec" href="/" target="_blank" rel="noopener">🛒 Application client</a>
+      </div>
+    </section>
+
+    <section class="section" id="s-stock">
+      <div class="carte" id="c-stock">
+        <h2>📦 État du stock</h2>
+        <div class="resume-stock" id="r-stock"></div>
+        <div id="l-stock"></div>
+      </div>
+    </section>
+
+    <section class="section" id="s-commandes">
+      <div class="carte"><h2>Dernières commandes</h2><div class="vide" id="i-cmd"></div><div id="l-cmd"></div></div>
+    </section>
+
+    <section class="section" id="s-alertes">
+      <div class="carte"><h2>Dernières alertes</h2><div class="vide" id="i-alt"></div><div id="l-alt"></div></div>
+    </section>
+  </main>
+  <details id="diag" style="max-width:1180px;margin:0 auto;padding:0 14px;color:var(--gris);font-size:13px">
+    <summary style="cursor:pointer;padding:8px 0">🔎 Diagnostic (enregistrements vers Google)</summary>
+    <div style="padding:4px 0" id="etat-push"></div>
+    <div style="padding:4px 0"><span id="etat-notif"></span>
+      <button id="btn-notif" type="button" style="margin-left:6px;padding:4px 10px;border:1px solid var(--gris);border-radius:8px;background:none;color:inherit;cursor:pointer">Tester l'alerte</button></div>
+    <div id="etat-ia" style="padding:4px 0"></div>
+    <div id="journal" style="padding:4px 0 8px"></div>
+  </details>
+  <div id="version" style="text-align:center;color:var(--gris);font-size:12px;padding:8px 0 90px"></div>
+
+  <nav id="onglets-bas" aria-label="Sections">
+    <button data-s="accueil" class="actif"><span class="ico">📊</span>Accueil</button>
+    <button data-s="stock"><span class="ico">📦</span>Stock<span class="pastille" id="p-stock" hidden></span></button>
+    <button data-s="commandes"><span class="ico">🧾</span>Commandes</button>
+    <button data-s="alertes"><span class="ico">⚠️</span>Alertes<span class="pastille" id="p-alertes" hidden></span></button>
+  </nav>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const CAT = { COMMANDE:["Commande",""], QUESTION_STOCK_PRIX:["Question",""], RECLAMATION:["Réclamation","rouge"], CREDIT_PAIEMENT:["Crédit / paiement","orange"], AUTRE:["Autre",""] };
+  const nf = new Intl.NumberFormat("fr-FR");
+  let jeton = "";
+  let minuteur = null;
+  let tentatives = 0;
+
+  function lire(k){ try { return localStorage.getItem(k) || ""; } catch(e){ return ""; } }
+  function ecrire(k,v){ try { v ? localStorage.setItem(k,v) : localStorage.removeItem(k); } catch(e){} }
+
+  function el(tag, classe, texte){ const e=document.createElement(tag); if(classe) e.className=classe; if(texte!==undefined) e.textContent=texte; return e; }
+  function duree(sec){ return sec < 90 ? sec + " s" : (sec < 5400 ? Math.round(sec/60) + " min" : (sec < 172800 ? Math.round(sec/3600) + " h" : Math.round(sec/86400) + " j")); }
+  // Ligne « 📍 quartier · 📞 téléphone » (le numéro est cliquable pour appeler). Texte inséré en textContent.
+  function numero(ligne){ return String(ligne.Telephone || "").replace(/\D/g, ""); }
+  function nouveauClient(ligne){ return !!ligne.Client && !String(ligne.Client).startsWith("web-"); }
+  function coordonnees(ligne){
+    const tel = numero(ligne);
+    const quartier = String(ligne.Quartier || "").trim();
+    if (!tel && !quartier && !nouveauClient(ligne)) return null;
+    const d = el("div","bas");
+    if (quartier) d.appendChild(document.createTextNode("📍 " + quartier + " · "));
+    if (tel) { const a = el("a","", "📞 " + tel); a.href = "tel:" + tel; a.style.color = "var(--bleu)"; d.appendChild(a); }
+    else d.appendChild(document.createTextNode("📞 numéro non reçu"));
+    return d;
+  }
+  // Fiche détaillée affichée quand on touche une ligne
+  function fiche(ligne, avecLivraison){
+    const f = el("div","bas"); f.style.cssText = "background:var(--fond);border-radius:10px;padding:10px;margin-top:8px;line-height:1.7";
+    f.appendChild(el("div","", "👤 " + (ligne.Client || "Client")));
+    const tel = numero(ligne);
+    if (tel) {
+      const r = el("div",""); const a1 = el("a","", "📞 Appeler " + tel); a1.href = "tel:" + tel;
+      const wa = el("a","", "💬 WhatsApp"); wa.href = "https://wa.me/" + (tel.length === 8 ? "222" + tel : tel); wa.target = "_blank"; wa.rel = "noopener";
+      [a1, wa].forEach(x => { x.style.cssText = "color:var(--bleu);margin-right:14px;font-weight:600"; r.appendChild(x); });
+      f.appendChild(r);
+    } else f.appendChild(el("div","", "📞 Numéro non reçu (commande ancienne, ou colonne « Telephone » absente du Sheet)"));
+    f.appendChild(el("div","", "📍 " + (String(ligne.Quartier || "").trim() || "Quartier non reçu")));
+    if (avecLivraison && ligne.Livraison) f.appendChild(el("div","", "🚚 Livraison : " + String(ligne.Livraison).slice(0,10)));
+    return f;
+  }
+  function rendreCliquable(l, ligne, avecLivraison){
+    const f = fiche(ligne, avecLivraison); f.hidden = true; l.appendChild(f);
+    l.style.cursor = "pointer";
+    l.onclick = (e) => { if (e.target.closest("a")) return; f.hidden = !f.hidden; };
+  }
+  function heure(iso){ return (iso||"").replace("T"," ").slice(5,16); }
+
+  // Explique clairement pourquoi les données n'arrivent pas
+  function diagnostic(statut){
+    if (statut === 404) return "Le serveur ne connaît pas encore le tableau de bord. Mettez à jour agent_laitier.py sur GitHub (dernière version), puis attendez « Your service is live » sur Render.";
+    if (statut === 502 || statut === 503 || statut === 504) return "Le serveur démarre ou redéploie (plan gratuit en veille). Réessayez dans une minute.";
+    if (statut === 500) return "Erreur du serveur. Regardez les Logs sur Render.";
+    return "Réponse inattendue du serveur (code " + statut + ").";
+  }
+  function bandeau(texte){
+    const av = $("avertissements"); av.innerHTML = "";
+    const b = el("div","alerte-source","⚠ " + texte);
+    const bt = el("button","reessayer","Réessayer"); bt.type = "button"; bt.onclick = charger; b.appendChild(bt);
+    av.appendChild(b);
+    document.querySelectorAll(".valeur").forEach(v => v.classList.remove("squelette"));
+  }
+  // Interroge le serveur ; renvoie {ok, statut, donnees, message}
+  async function demander(frais){
+    let r;
+    const ctl = new AbortController(); const delai = setTimeout(() => ctl.abort(), 70000);
+    try { r = await fetch("/admin/api/dashboard" + (frais ? "?frais=1" : ""), { headers: { "X-Admin-Token": jeton }, cache:"no-store", signal: ctl.signal }); }
+    catch(e) { return { ok:false, statut:0, message: e.name === "AbortError" ? "Le serveur met trop de temps à répondre (il se réveille peut-être). Réessayez." : "Pas de connexion internet ou serveur injoignable." }; }
+    finally { clearTimeout(delai); }
+    if (r.status === 401) return { ok:false, statut:401, message:"Mot de passe incorrect." };
+    if (!r.ok) return { ok:false, statut:r.status, message:diagnostic(r.status) };
+    try { return { ok:true, statut:200, donnees: await r.json() }; }
+    catch(e) { return { ok:false, statut:200, message:"Réponse illisible du serveur (mauvaise version de agent_laitier.py ?)." }; }
+  }
+
+  let enCours = false;
+  async function charger(frais, silencieux){
+    if (enCours) return;                       // une seule demande à la fois
+    enCours = true;
+    const bouton = $("actualiser");
+    bouton.disabled = true; bouton.textContent = "⏳ Actualisation…";
+    if (!silencieux) $("maj").textContent = "Actualisation en cours…";
+    const res = await demander(frais === true);
+    enCours = false;
+    bouton.disabled = false; bouton.textContent = "↻ Actualiser";
+    if (res.statut === 401) { deconnecter(res.message); return; }
+    if (!res.ok) { $("maj").textContent = "Données indisponibles"; bandeau(res.message); return; }
+    try {
+      afficher(res.donnees);
+      const so = res.donnees.sources;
+      const attente = so.commandes.chargement || so.alertes.chargement;
+      const miseAJour = so.commandes.en_cours || so.alertes.en_cours;
+      if (attente || miseAJour) {
+        // Google est lent : on réaffiche ce qu'on a, puis on revérifie sans bloquer l'écran
+        if (miseAJour && !attente) $("maj").textContent = "Google met à jour… (données de il y a " + duree(Math.max(so.commandes.age||0, so.alertes.age||0)) + ")";
+        if (tentatives++ < 12) setTimeout(() => charger(false, true), 4000);
+      } else { tentatives = 0; ecrire("admin_cache", JSON.stringify(res.donnees)); }
+    }
+    catch(e) { $("maj").textContent = "Erreur d'affichage"; bandeau("Erreur d'affichage : " + e.message); }
+  }
+
+  function afficher(d){
+    $("maj").textContent = "Mis à jour à " + (d.maintenant||"").slice(11,16);
+    $("version").textContent = d.version ? "Version du serveur : " + d.version : "Version du serveur : ancienne (mettez à jour agent_laitier.py)";
+
+    const av = $("avertissements"); av.innerHTML = "";
+    ["commandes","alertes"].forEach(n => {
+      const s = d.sources[n];
+      const nom = n==="commandes" ? "Commandes" : "Alertes";
+      if (s.chargement) av.appendChild(el("div","alerte-source","⏳ " + nom + " : Google répond lentement, chargement en cours…"));
+      else if (s.avertissement) av.appendChild(el("div","alerte-source","⚠ " + nom + " : données anciennes (dernière lecture réussie il y a " + duree(s.age||0) + "). Google ne répond pas : " + String(s.avertissement).slice(0,160)));
+      if ((s.colonnes_manquantes || []).length) av.appendChild(el("div","alerte-source","⚠ " + nom + " : le Google Sheet n'a pas la/les colonne(s) « " + s.colonnes_manquantes.join(" » et « ") + " ». Ajoutez-les dans la ligne 1 (sans accent), à droite des autres colonnes. Les commandes passées avant ne les contiennent pas."));
+      if (s.chargement) {}
+      else if (s.erreur) av.appendChild(el("div","alerte-source","⚠ " + (n==="commandes"?"Commandes":"Alertes") + " : " + s.erreur));
+      else if (s.source === "local") av.appendChild(el("div","alerte-source","ℹ " + (n==="commandes"?"Commandes":"Alertes") + " : lien Google Sheets non configuré, données de secours (temporaires)."));
+    });
+
+    // Ce que Google a vraiment renvoyé : permet de voir si les données sont anciennes
+    const info = (src, nom) => {
+      if (src.erreur || src.chargement) return "";
+      const der = src.derniere_date ? "la plus récente : " + src.derniere_date.replace("T"," ").slice(0,16) : "aucune ligne";
+      return src.nb_lignes + " ligne(s) lue(s), " + der + (src.locales ? " · dont " + src.locales + " en secours local (pas encore dans Google)" : "");
+    };
+    $("i-cmd").textContent = info(d.sources.commandes);
+    $("i-alt").textContent = info(d.sources.alertes);
+    const ia = d.ia || {};
+    $("etat-ia").textContent = "IA du chat : " + (ia.modele || "pas encore utilisée depuis le démarrage") +
+      " · modèles prévus : " + (ia.modeles||[]).join(" → ") +
+      (ia.requetes_restantes_jour ? " · requêtes restantes aujourd'hui (modèle courant) : " + ia.requetes_restantes_jour : "") +
+      (ia.nb_plafonds ? " · plafond gratuit atteint " + ia.nb_plafonds + " fois, dernier : " + ia.dernier_plafond : " · plafond gratuit jamais atteint");
+    const pu = d.push || {};
+    $("etat-push").textContent = "Notifications téléphone : " + (!pu.configure ? "non configurées sur le serveur (clés VAPID absentes)"
+      : pu.appareils + " appareil(s) abonné(s)" + (pu.ok === false ? " · dernier envoi ÉCHOUÉ (" + pu.erreur + ")" : pu.ok ? " · dernier envoi réussi" : ""));
+    const nt = d.notif || {};
+    $("etat-notif").textContent = "Alerte " + [nt.email ? "e-mail" : "", nt.telegram ? "Telegram" : ""].filter(Boolean).join(" + ") + " : " + (!nt.configure ? "non configurée"
+      : (nt.email_ok === false || nt.ok === false) ? "dernier envoi ÉCHOUÉ (" + (nt.email_erreur || nt.erreur) + ")"
+      : (nt.email_ok || nt.ok) ? "dernier envoi réussi" : "configurée (aucun envoi depuis le démarrage)");
+    const jr = $("journal"); jr.innerHTML = "";
+    if (!(d.journal_ecritures||[]).length) jr.appendChild(el("div","vide","Aucune écriture depuis le dernier démarrage du serveur."));
+    (d.journal_ecritures||[]).forEach(j => jr.appendChild(el("div","", j.heure + " · " + j.feuille + " · " + j.statut + (j.detail ? " (" + j.detail + ")" : ""))));
+
+    const k = d.kpi;
+    document.querySelectorAll(".valeur").forEach(v => v.classList.remove("squelette"));
+    const errC = !!(d.sources.commandes.erreur || d.sources.commandes.chargement), errA = !!(d.sources.alertes.erreur || d.sources.alertes.chargement);
+    const ou = (err, txt) => err ? "–" : txt;
+    $("k-tot").textContent = ou(errC, nf.format(k.total_aujourdhui));
+    $("k-cmd-liv").textContent = errC ? "Données indisponibles" :
+      k.cmd_aujourdhui + " commande(s) · " + k.livraison_aujourdhui + " à livrer aujourd'hui · " + k.livraison_demain + " demain";
+    // variation par rapport à hier : flèche + texte + couleur (jamais la couleur seule)
+    const dl = $("k-delta"); dl.className = "delta"; dl.hidden = errC;
+    const t = k.total_aujourdhui, y = k.total_hier;
+    if (y > 0) {
+      const p = Math.round((t - y) / y * 100);
+      dl.textContent = (p >= 0 ? "▲ +" : "▼ −") + Math.abs(p) + " % vs hier (" + nf.format(y) + ")";
+      dl.classList.add(p >= 0 ? "haut" : "bas");
+    } else if (t > 0) { dl.textContent = "▲ nouveau vs hier (0)"; dl.classList.add("haut"); }
+    else { dl.textContent = "Pas encore de vente aujourd'hui"; }
+    $("k-7j").textContent = ou(errC, nf.format(k.total_7j));
+    $("k-nb7").textContent = errC ? "" : k.nb_7j + " commande(s)";
+    $("k-alt").textContent = ou(errA, nf.format(k.alertes_7j));
+    const cats = Object.entries(d.alertes_par_categorie).map(([c,n]) => (CAT[c]||[c])[0] + " " + n).join(" · ");
+    $("k-cat").textContent = errA ? "" : (cats || "Aucune alerte");
+
+    // graphique : barres tactiles (un appui affiche le détail)
+    const g = $("graphe"); g.innerHTML = "";
+    const max = Math.max(1, ...d.serie_7j.map(x => x.total));
+    const jours = ["dim","lun","mar","mer","jeu","ven","sam"];
+    const detail = $("detail-barre");
+    const montrerDetail = (x, col) => {
+      g.querySelectorAll(".col").forEach(c => c.classList.remove("choisi"));
+      col.classList.add("choisi");
+      detail.textContent = x.jour.split("-").reverse().join("/") + " : " + nf.format(Math.round(x.total)) + " MRU · " + x.nb + " commande(s)";
+    };
+    d.serie_7j.forEach((x,i) => {
+      const dernier = i === d.serie_7j.length-1;
+      const col = el("button","col bar-btn" + (dernier ? " auj":""));
+      col.type = "button";
+      col.setAttribute("aria-label", x.jour + " : " + Math.round(x.total) + " MRU, " + x.nb + " commandes");
+      col.appendChild(el("div","v", x.total ? nf.format(Math.round(x.total)) : ""));
+      const b = el("div","barre"); b.style.height = Math.round(x.total/max*100) + "%";
+      col.appendChild(b);
+      col.appendChild(el("div","j", jours[new Date(x.jour+"T12:00:00").getDay()]));
+      col.onclick = () => montrerDetail(x, col);
+      g.appendChild(col);
+      if (dernier) montrerDetail(x, col);
+    });
+
+    // À traiter : ce qui demande une action, en premier
+    const lt = $("l-todo"); lt.innerHTML = "";
+    const ligneTodo = (pic, titre, sous, ou_) => {
+      const b = el("button","todo"); b.type = "button";
+      b.appendChild(el("span","pic",pic));
+      const tx = el("span","txt",titre); if (sous) tx.appendChild(el("small","",sous));
+      b.appendChild(tx); b.appendChild(el("span","chev","›"));
+      b.onclick = () => montrer(ou_); lt.appendChild(b);
+    };
+    const st = d.stock_resume;
+    if (st.rupture > 0) ligneTodo("⛔", st.rupture + " produit(s) en rupture", d.stock.filter(p => p.niveau==="rupture").map(p => p.produit).join(", "), "stock");
+    if (st.bas > 0) ligneTodo("⚠️", st.bas + " produit(s) en stock bas", d.stock.filter(p => p.niveau==="bas").map(p => p.produit).join(", "), "stock");
+    const rec = d.alertes_par_categorie.RECLAMATION || 0, cre = d.alertes_par_categorie.CREDIT_PAIEMENT || 0;
+    if (rec > 0) ligneTodo("💬", rec + " réclamation(s) à traiter", "7 derniers jours", "alertes");
+    if (cre > 0) ligneTodo("💳", cre + " demande(s) de crédit / paiement", "7 derniers jours", "alertes");
+    if (!errC && k.livraison_aujourdhui > 0) ligneTodo("🚚", k.livraison_aujourdhui + " livraison(s) prévue(s) aujourd'hui", "", "commandes");
+    if (!lt.children.length) { const o = el("div","todo ok"); o.appendChild(el("span","pic","✅")); o.appendChild(el("span","txt","Rien d'urgent pour le moment.")); lt.appendChild(o); }
+
+    // listes
+    const lc = $("l-cmd"); lc.innerHTML = "";
+    if (!d.dernieres_commandes.length) lc.appendChild(el("div","vide","Aucune commande pour le moment."));
+    d.dernieres_commandes.forEach(c => {
+      const l = el("div","ligne");
+      const h = el("div","haut"); h.appendChild(el("span","", c.Client || "Client")); h.appendChild(el("span","", nf.format(Number(c["Total MRU"])||0) + " MRU"));
+      l.appendChild(h);
+      const co = coordonnees(c); if (co) l.appendChild(co);
+      l.appendChild(el("div","bas", heure(c.Date) + (c.Livraison ? " · livraison " + String(c.Livraison).slice(0,10) : "")));
+      if (c.Message) l.appendChild(el("div","bas", c.Message));
+      rendreCliquable(l, c, true);
+      lc.appendChild(l);
+    });
+
+    const la = $("l-alt"); la.innerHTML = "";
+    if (!d.dernieres_alertes.length) la.appendChild(el("div","vide","Aucune alerte. 👍"));
+    d.dernieres_alertes.forEach(a => {
+      const c = CAT[a.Categorie] || [a.Categorie || "Autre",""];
+      const l = el("div","ligne");
+      const h = el("div","haut"); h.appendChild(el("span","", a.Client || "Client")); h.appendChild(el("span","badge " + c[1], c[0]));
+      l.appendChild(h);
+      const co2 = coordonnees(a); if (co2) l.appendChild(co2);
+      l.appendChild(el("div","bas", heure(a.Date)));
+      if (a.Message) l.appendChild(el("div","bas", a.Message));
+      rendreCliquable(l, a, false);
+      la.appendChild(l);
+    });
+
+    const r = d.stock_resume;
+    $("r-stock").textContent = r.total
+      ? r.rupture + " rupture(s) · " + r.bas + " stock bas · " + r.ok + " correct(s)"
+      : "";
+    const ls = $("l-stock"); ls.innerHTML = "";
+    if (!d.stock.length) ls.appendChild(el("div","vide","Aucun produit dans le stock."));
+    const maxStock = Math.max(1, ...d.stock.map(p => p.stock));
+    d.stock.forEach(p => {
+      const l = el("div","ligne"); const h = el("div","haut");
+      h.appendChild(el("span","", p.produit));
+      const lib = p.niveau==="rupture" ? "Rupture" : (p.niveau==="bas" ? "Stock bas" : "OK");
+      h.appendChild(el("span","badge " + (p.niveau==="rupture"?"rouge":(p.niveau==="bas"?"orange":"vert")), lib));
+      l.appendChild(h);
+      l.appendChild(el("div","bas", nf.format(p.stock) + " " + (p.unite||"") + " · " + nf.format(p.prix) + " MRU · alerte à " + p.seuil));
+      const n = el("div","niveau"); const i = el("i", p.niveau); i.style.width = Math.max(2, Math.round(p.stock/maxStock*100)) + "%";
+      n.appendChild(i); l.appendChild(n);
+      ls.appendChild(l);
+    });
+
+    const pb = d.stock_resume.rupture + d.stock_resume.bas;
+    $("p-stock").textContent = pb; $("p-stock").hidden = pb === 0;
+    $("p-alertes").textContent = d.kpi.alertes_7j; $("p-alertes").hidden = d.kpi.alertes_7j === 0;
+    $("lien-produits").href = "/admin/produits?cle=" + encodeURIComponent(jeton);
+  }
+
+  function montrer(nom){
+    // Grand écran : tout est déjà affiché, on fait défiler jusqu'au bloc et on le met en évidence
+    if (window.matchMedia("(min-width: 760px)").matches) {
+      const cible = nom === "stock" ? $("c-stock") : $("s-" + nom).querySelector(".carte");
+      if (cible) {
+        cible.scrollIntoView({ behavior:"smooth", block:"center" });
+        cible.classList.remove("flash"); void cible.offsetWidth; cible.classList.add("flash");
+      }
+      return;
+    }
+    document.querySelectorAll(".section").forEach(s => s.classList.toggle("actif", s.id === "s-" + nom));
+    document.querySelectorAll("#onglets-bas button").forEach(b => b.classList.toggle("actif", b.dataset.s === nom));
+    window.scrollTo(0, 0);
+  }
+  document.querySelectorAll("#onglets-bas button").forEach(b => b.onclick = () => montrer(b.dataset.s));
+
+  document.querySelectorAll("[data-go]").forEach(b => b.onclick = () => montrer(b.dataset.go));
+
+  function ouvrir(donnees){
+    $("connexion").hidden = true; $("tableau").hidden = false;
+    let ancien = null;
+    if (!donnees) { try { ancien = JSON.parse(lire("admin_cache") || "null"); } catch(e) {} }
+    if (donnees) { try { afficher(donnees); ecrire("admin_cache", JSON.stringify(donnees)); } catch(e) { charger(); } }
+    else if (ancien) {
+      // Affichage immédiat des dernières données connues, puis mise à jour
+      try { afficher(ancien); $("maj").textContent = "Dernières données (" + (ancien.maintenant||"").slice(11,16) + ") · actualisation…"; } catch(e) { ancien = null; }
+    }
+    if (!donnees) {
+      if (!ancien) document.querySelectorAll(".valeur").forEach(v => v.classList.add("squelette"));
+      charger();
+    }
+    clearInterval(minuteur);
+    minuteur = setInterval(() => { if (!document.hidden) charger(false, true); }, 60000);
+  }
+  function deconnecter(msg){
+    clearInterval(minuteur); ecrire("admin_jeton",""); ecrire("admin_cache","");
+    jeton = ""; $("tableau").hidden = true; $("connexion").hidden = false;
+    $("erreur").textContent = msg || "";
+  }
+  async function entrer(){
+    const mdp = $("mdp").value.trim();
+    if (!mdp) return;
+    jeton = mdp; $("erreur").textContent = "";
+    const res = await demander();
+    if (!res.ok) {
+      $("erreur").textContent = res.message;
+      if (res.statut === 401) jeton = "";
+      return;
+    }
+    ecrire("admin_jeton", jeton); $("mdp").value = ""; ouvrir(res.donnees); etatPush();
+  }
+  $("voir").onclick = () => { const m = $("mdp"); const cache = m.type === "password"; m.type = cache ? "text" : "password"; $("voir").textContent = cache ? "🙈" : "👁"; };
+  $("entrer").onclick = entrer;
+  $("mdp").addEventListener("keydown", e => { if (e.key === "Enter") entrer(); });
+  $("actualiser").onclick = () => { tentatives = 0; charger(true); };
+  $("btn-notif").onclick = async () => {
+    const b = $("btn-notif"); b.disabled = true; b.textContent = "Envoi…";
+    try {
+      const r = await fetch("/admin/api/test-notif", { method:"POST", headers:{ "X-Admin-Token": jeton } });
+      const j = await r.json(); alert(j.message || "Terminé");
+    } catch (e) { alert("Impossible de joindre le serveur : " + e); }
+    b.disabled = false; b.textContent = "Tester l'alerte";
+    charger(true);
+  };
+
+
+  // ---------- Alarme sonore : bip répété jusqu'à « J'ai vu » ----------
+  let ctxAudio = null, minuteurAlarme = null, minuteurEvt = null, verrouEcran = null, nouveaux = [];
+  function sonPret(){ return !!ctxAudio && ctxAudio.state === "running"; }
+  function majAvisSon(){ $("avis-son").hidden = !(lire("admin_son") === "1" && !sonPret()); }
+  function debloquerSon(){
+    // À appeler dans un geste de l'utilisateur (touche, clic) : le navigateur n'autorise le son qu'à ce moment.
+    try {
+      ctxAudio = ctxAudio || new (window.AudioContext || window.webkitAudioContext)();
+      const fin = () => majAvisSon();
+      const p = ctxAudio.resume(); if (p && p.then) p.then(fin, fin);
+      const tampon = ctxAudio.createBuffer(1, 1, 22050), src = ctxAudio.createBufferSource();
+      src.buffer = tampon; src.connect(ctxAudio.destination); src.start(0);   // petit son muet qui « réveille » l'audio sur iPhone
+    } catch(e) {}
+    majAvisSon();
+  }
+  ["pointerdown", "touchstart", "touchend", "click", "keydown"].forEach(ev =>
+    document.addEventListener(ev, () => { if (lire("admin_son") === "1" && !sonPret()) debloquerSon(); }, { passive: true }));
+  function bip(){
+    try {
+      if (!ctxAudio) { majAvisSon(); return; }
+      if (ctxAudio.state !== "running") { ctxAudio.resume(); majAvisSon(); }
+      [0, 0.28, 0.56].forEach(dec => {
+        const o = ctxAudio.createOscillator(), g = ctxAudio.createGain();
+        o.type = "square"; o.frequency.value = 880; o.connect(g); g.connect(ctxAudio.destination);
+        const t = ctxAudio.currentTime + dec;
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.5, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+        o.start(t); o.stop(t + 0.22);
+      });
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 200]);
+    } catch(e) {}
+  }
+  function majBoutonSon(){
+    const actif = lire("admin_son") === "1";
+    $("son").textContent = actif ? "🔔" : "🔕";
+    $("son").title = actif ? "Alarme sonore activée (appuyez pour couper)" : "Appuyez pour activer l'alarme sonore";
+  }
+  async function garderEcranAllume(){
+    try { if (navigator.wakeLock && lire("admin_son") === "1" && !document.hidden) verrouEcran = await navigator.wakeLock.request("screen"); } catch(e) {}
+  }
+  function arreterAlarme(){
+    fetch("/admin/api/vu", { method:"POST", headers:{ "X-Admin-Token": jeton } }).catch(() => {});   // arrête les rappels de notification
+    clearInterval(minuteurAlarme); minuteurAlarme = null;
+    $("alarme").hidden = true; document.title = "Tableau de bord";
+    if (nouveaux.length) { ecrire("admin_evt_vu", String(Math.max.apply(null, nouveaux.map(e => e.id)))); }
+    nouveaux = [];
+  }
+  function declencherAlarme(liste){
+    nouveaux = nouveaux.concat(liste);
+    const n = nouveaux.length;
+    $("alarme-texte").textContent = (sonPret() ? "" : "🔈 Touchez l'écran pour activer le son\n") + (n > 1 ? n + " nouveaux événements — dernier :\n" : "") + nouveaux[nouveaux.length - 1].texte;
+    $("alarme").hidden = false; document.title = "🔔 (" + n + ") Nouvelle commande";
+    if (!minuteurAlarme) { bip(); minuteurAlarme = setInterval(bip, 3000); }
+    charger(true, true);   // met aussi à jour les chiffres et les listes
+  }
+  async function verifierEvenements(){
+    if (lire("admin_son") !== "1" || !jeton) return;
+    try {
+      const r = await fetch("/admin/api/evenements", { headers: { "X-Admin-Token": jeton }, cache: "no-store" });
+      if (!r.ok) return;
+      const liste = (await r.json()).evenements || [];
+      const vuTxt = lire("admin_evt_vu");
+      const max = liste.length ? Math.max.apply(null, liste.map(e => e.id)) : 0;
+      if (!vuTxt) { ecrire("admin_evt_vu", String(max)); return; }   // première activation : pas de fausse alarme
+      if (!liste.length) return;
+      const deja = new Set(nouveaux.map(e => e.id)), vu = Number(vuTxt);
+      const neufs = liste.filter(e => e.id > vu && !deja.has(e.id));
+      if (neufs.length) declencherAlarme(neufs);
+    } catch(e) {}
+  }
+  function demarrerSurveillance(){
+    clearInterval(minuteurEvt);
+    if (lire("admin_son") === "1") { minuteurEvt = setInterval(verifierEvenements, 10000); verifierEvenements(); garderEcranAllume(); }
+  }
+  $("son").onclick = () => {
+    if (lire("admin_son") === "1") { ecrire("admin_son", ""); clearInterval(minuteurEvt); arreterAlarme(); try { verrouEcran && verrouEcran.release(); } catch(e) {} majBoutonSon(); majAvisSon(); return; }
+    ecrire("admin_son", "1"); debloquerSon(); majBoutonSon(); bip(); demarrerSurveillance();
+  };
+  $("alarme-ok").onclick = arreterAlarme;
+  $("alarme").addEventListener("pointerdown", () => { if (!sonPret()) { debloquerSon(); bip(); } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { garderEcranAllume(); verifierEvenements(); } });
+  majBoutonSon();
+
+
+  // ---------- Notifications téléphone (fonctionnent application fermée, écran verrouillé) ----------
+  function cleVersTableau(b64){
+    const rempli = (b64 + "=".repeat((4 - b64.length % 4) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+    const brut = atob(rempli); const sortie = new Uint8Array(brut.length);
+    for (let i = 0; i < brut.length; i++) sortie[i] = brut.charCodeAt(i);
+    return sortie;
+  }
+  function appelPush(chemin, corps){
+    return fetch(chemin, { method: corps ? "POST" : "GET", cache:"no-store",
+      headers: Object.assign({ "X-Admin-Token": jeton }, corps ? { "Content-Type":"application/json" } : {}),
+      body: corps ? JSON.stringify(corps) : undefined }).then(r => r.json());
+  }
+  let cleVapid = "";
+  async function etatPush(){
+    const avis = $("avis-push");
+    try {
+      const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+      const installee = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+      if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+        if (ios && !installee) { $("avis-push-texte").textContent = "📲 Sur iPhone : touchez Partager puis « Sur l'écran d'accueil », et ouvrez le tableau de bord depuis cette icône pour activer les notifications."; $("btn-push").hidden = true; avis.hidden = false; }
+        else avis.hidden = true;
+        return;
+      }
+      const rep = await appelPush("/admin/api/push-cle");
+      cleVapid = rep.cle || "";
+      if (!cleVapid) { avis.hidden = true; return; }           // non configuré sur le serveur : on n'affiche rien
+      const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      await navigator.serviceWorker.ready;
+      const abo = await reg.pushManager.getSubscription();
+      if (abo && Notification.permission === "granted") {
+        appelPush("/admin/api/abonner", abo.toJSON());          // le serveur peut avoir redémarré : on lui redonne l'abonnement
+        avis.hidden = true; return;
+      }
+      $("avis-push-texte").textContent = Notification.permission === "denied"
+        ? "🔕 Notifications bloquées : autorisez-les dans les réglages du navigateur pour ce site."
+        : "📲 Recevez les commandes même téléphone verrouillé.";
+      $("btn-push").hidden = Notification.permission === "denied";
+      avis.hidden = false;
+    } catch(e) { avis.hidden = true; }
+  }
+  $("btn-push").onclick = async () => {
+    const b = $("btn-push"); b.disabled = true;
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") { await etatPush(); b.disabled = false; return; }
+      const reg = await navigator.serviceWorker.ready;
+      const abo = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: cleVersTableau(cleVapid) });
+      const r = await appelPush("/admin/api/abonner", abo.toJSON());
+      $("avis-push-texte").textContent = r.ok ? "✅ Notifications activées sur cet appareil." : "⚠ " + (r.message || "Échec de l'activation");
+      b.hidden = true; if (r.ok) setTimeout(() => { $("avis-push").hidden = true; }, 3000);
+      charger(true, true);
+    } catch(e) { $("avis-push-texte").textContent = "⚠ Impossible d'activer : " + e; }
+    b.disabled = false;
+  };
+
+  jeton = lire("admin_jeton");
+  if (jeton) { ouvrir(); etatPush(); }
+  // Après un rechargement, le navigateur exige un nouvel appui pour le son : on l'affiche clairement
+  if (lire("admin_son") === "1") { demarrerSurveillance(); majAvisSon(); }
+</script>
+</body>
+</html>

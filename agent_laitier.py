@@ -22,6 +22,8 @@ import re
 import hmac
 import time
 import threading
+import base64
+import struct
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
@@ -94,10 +96,208 @@ def _notifier_email(texte):
         return False
 
 
-def notifier_responsable(texte):
-    """Envoie l'alerte (e-mail et/ou Telegram). Ne lève jamais d'exception :
-    une alerte qui échoue ne doit jamais empêcher d'enregistrer la commande."""
-    ok_mail = _notifier_email(texte)
+# ============================================================
+# NOTIFICATIONS PUSH (téléphone verrouillé / application fermée) — gratuit
+# Standards RFC 8291 (chiffrement) et RFC 8292 (VAPID). Aucun service tiers
+# payant : le message passe par le service de push du navigateur (Google,
+# Apple, Mozilla...), gratuit et sans compte.
+# ============================================================
+VAPID_PUBLIC = os.environ.get("VAPID_PUBLIC_KEY", "").strip()
+VAPID_PRIVATE = os.environ.get("VAPID_PRIVATE_KEY", "").strip()
+VAPID_SUJET = os.environ.get("VAPID_EMAIL", "mailto:admin@example.com").strip()
+if VAPID_SUJET and not VAPID_SUJET.startswith(("mailto:", "https:")):
+    VAPID_SUJET = "mailto:" + VAPID_SUJET
+HOTES_PUSH_AUTORISES = (".googleapis.com", ".push.services.mozilla.com", ".push.apple.com",
+                        ".notify.windows.com", ".mozilla.com", ".mozaws.net")
+NB_ABONNEMENTS_MAX = 12
+NB_RAPPELS = 3            # rappels toutes les 60 s tant que « J'ai vu » n'a pas été appuyé
+INTERVALLE_RAPPEL = 60
+_abonnements = {}         # endpoint -> {"endpoint", "keys": {"p256dh", "auth"}}
+_verrou_abo = threading.Lock()
+_abo_charges = {"fait": False}
+_dernier_vu = {"id": 0}
+_etat_push = {"ok": None, "erreur": "", "envoyes": 0}
+
+
+def push_configure():
+    return bool(VAPID_PUBLIC and VAPID_PRIVATE)
+
+
+def _b64u(octets):
+    return base64.urlsafe_b64encode(octets).rstrip(b"=").decode()
+
+
+def _b64u_dec(texte):
+    return base64.urlsafe_b64decode(texte + "=" * (-len(texte) % 4))
+
+
+def _chiffrer_push(donnees, p256dh, auth, cle_privee_serveur=None, sel=None):
+    """Chiffre le message pour le navigateur (RFC 8291, aes128gcm, 1 seul bloc)."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    courbe = ec.SECP256R1()
+    privee = cle_privee_serveur or ec.generate_private_key(courbe)
+    publique = privee.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    cle_navigateur = ec.EllipticCurvePublicKey.from_encoded_point(courbe, p256dh)
+    secret = privee.exchange(ec.ECDH(), cle_navigateur)
+    sel = sel or os.urandom(16)
+    ikm = HKDF(hashes.SHA256(), 32, auth, b"WebPush: info\x00" + p256dh + publique).derive(secret)
+    cle = HKDF(hashes.SHA256(), 16, sel, b"Content-Encoding: aes128gcm\x00").derive(ikm)
+    nonce = HKDF(hashes.SHA256(), 12, sel, b"Content-Encoding: nonce\x00").derive(ikm)
+    chiffre = AESGCM(cle).encrypt(nonce, donnees + b"\x02", None)
+    return sel + struct.pack(">IB", 4096, len(publique)) + publique + chiffre
+
+
+def _jeton_vapid(endpoint, privee_b64=None, maintenant=None):
+    """Jeton JWT ES256 prouvant au service de push que le message vient bien de ce serveur (RFC 8292)."""
+    from urllib.parse import urlparse
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
+    u = urlparse(endpoint)
+    entete = _b64u(json.dumps({"typ": "JWT", "alg": "ES256"}, separators=(",", ":")).encode())
+    corps = _b64u(json.dumps({"aud": f"{u.scheme}://{u.netloc}",
+                              "exp": int(maintenant or time.time()) + 12 * 3600,
+                              "sub": VAPID_SUJET}, separators=(",", ":")).encode())
+    privee = ec.derive_private_key(int.from_bytes(_b64u_dec(privee_b64 or VAPID_PRIVATE), "big"), ec.SECP256R1())
+    r, s_ = decode_dss_signature(privee.sign((entete + "." + corps).encode(), ec.ECDSA(hashes.SHA256())))
+    return entete + "." + corps + "." + _b64u(r.to_bytes(32, "big") + s_.to_bytes(32, "big"))
+
+
+def _endpoint_autorise(endpoint):
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(endpoint)
+    except Exception:
+        return False
+    hote = (u.hostname or "").lower()
+    return u.scheme == "https" and any(hote.endswith(h) for h in HOTES_PUSH_AUTORISES)
+
+
+def _appel_script(action, **charge):
+    """Mémoire durable des abonnements dans le script Google (ne se perd pas au redémarrage de Render)."""
+    if not (ALERTE_EMAIL and COMMANDES_WEBHOOK_URL and SHEETS_CLE):
+        return None
+    try:
+        if action == "abonnements":
+            r = requests.get(COMMANDES_WEBHOOK_URL, params={"action": "abonnements", "cle": SHEETS_CLE}, timeout=25)
+            return r.json()
+        r = requests.post(COMMANDES_WEBHOOK_URL, json=dict(charge, _action=action, _cle=SHEETS_CLE), timeout=25)
+        return r.json()
+    except Exception as e:
+        print("[PUSH] mémoire Google indisponible :", e)
+        return None
+
+
+def _charger_abonnements():
+    if _abo_charges["fait"]:
+        return
+    _abo_charges["fait"] = True
+    res = _appel_script("abonnements")
+    if res and res.get("succes"):
+        with _verrou_abo:
+            for a in res.get("abonnements", []):
+                if isinstance(a, dict) and a.get("endpoint") and _endpoint_autorise(a["endpoint"]):
+                    _abonnements.setdefault(a["endpoint"], a)
+
+
+def ajouter_abonnement(sub):
+    """Valide et mémorise un abonnement. Renvoie (ok, message)."""
+    try:
+        endpoint = str(sub.get("endpoint", ""))
+        cles = sub.get("keys") or {}
+        p256dh, auth = str(cles.get("p256dh", "")), str(cles.get("auth", ""))
+        if len(_b64u_dec(p256dh)) != 65 or len(_b64u_dec(auth)) != 16:
+            return False, "Clés d'abonnement invalides."
+    except Exception:
+        return False, "Abonnement invalide."
+    if not _endpoint_autorise(endpoint):
+        return False, "Service de notification non reconnu."
+    propre = {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}
+    _charger_abonnements()
+    with _verrou_abo:
+        nouveau = endpoint not in _abonnements
+        if nouveau and len(_abonnements) >= NB_ABONNEMENTS_MAX:
+            return False, f"Maximum {NB_ABONNEMENTS_MAX} appareils."
+        _abonnements[endpoint] = propre
+    if nouveau:
+        _pool_ecriture.submit(_appel_script, "abonner", abonnement=propre)
+    return True, "ok"
+
+
+def retirer_abonnement(endpoint):
+    with _verrou_abo:
+        existait = _abonnements.pop(endpoint, None) is not None
+    if existait:
+        _pool_ecriture.submit(_appel_script, "desabonner", endpoint=endpoint)
+
+
+def _envoyer_push_a(abo, charge_json):
+    """Envoie à un appareil. Renvoie True si accepté."""
+    corps = _chiffrer_push(charge_json, _b64u_dec(abo["keys"]["p256dh"]), _b64u_dec(abo["keys"]["auth"]))
+    r = requests.post(abo["endpoint"], data=corps, timeout=10, headers={
+        "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream",
+        "TTL": "600", "Urgency": "high",
+        "Authorization": f"vapid t={_jeton_vapid(abo['endpoint'])}, k={VAPID_PUBLIC}"})
+    if r.status_code in (404, 410):          # l'appareil s'est désabonné : on l'oublie
+        retirer_abonnement(abo["endpoint"])
+        return False
+    if not (200 <= r.status_code < 300):
+        _etat_push.update(ok=False, erreur=f"HTTP {r.status_code} {r.text[:120]}")
+        print("[PUSH] refus :", r.status_code, r.text[:120])
+        return False
+    return True
+
+
+def _notifier_push(titre, corps, evt_id=None, rappel=0):
+    """Notification sur tous les appareils abonnés (même téléphone verrouillé)."""
+    if not push_configure():
+        return False
+    _charger_abonnements()
+    with _verrou_abo:
+        liste = list(_abonnements.values())
+    if not liste:
+        return False
+    charge = json.dumps({"titre": titre, "corps": corps, "id": evt_id or 0, "rappel": rappel},
+                        ensure_ascii=False).encode()
+    ok_global = False
+    for abo in liste:
+        try:
+            if _envoyer_push_a(abo, charge):
+                ok_global = True
+        except Exception as e:
+            _etat_push.update(ok=False, erreur=str(e)[:150])
+            print("[PUSH] erreur :", e)
+    if ok_global:
+        _etat_push.update(ok=True, erreur="", envoyes=_etat_push["envoyes"] + 1)
+        if evt_id and rappel < NB_RAPPELS:
+            t = threading.Timer(INTERVALLE_RAPPEL, _rappel_push, args=(titre, corps, evt_id, rappel + 1))
+            t.daemon = True
+            t.start()
+    return ok_global
+
+
+def _rappel_push(titre, corps, evt_id, rappel):
+    if _dernier_vu["id"] >= evt_id:          # « J'ai vu » déjà appuyé : plus de rappel
+        return
+    _notifier_push("🔁 Rappel : " + titre.removeprefix("🔁 Rappel : "), corps, evt_id, rappel)
+
+
+def notifier_responsable(texte, evt_id=None):
+    """Envoie l'alerte (notification téléphone, e-mail, et/ou Telegram). Ne lève jamais
+    d'exception : une alerte qui échoue ne doit jamais empêcher d'enregistrer la commande."""
+    lignes = texte.split("\n")
+    try:
+        ok_push = _notifier_push(lignes[0], "\n".join(lignes[1:])[:300], evt_id)
+    except Exception as e:
+        ok_push = False
+        print("[PUSH] erreur inattendue :", e)
+    ok_mail = _notifier_email(texte) or ok_push
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return ok_mail
     ok_global = ok_mail
@@ -401,6 +601,7 @@ def noter_evenement(texte):
         _evenements.append({"id": ident, "type": "commande" if texte.startswith("🛒") else "alerte",
                             "heure": datetime.now().strftime("%H:%M"), "texte": texte[:600]})
         del _evenements[:-20]
+        return ident
 
 
 def ajouter_ligne_arriere_plan(fichier, donnees, webhook_url=None, alerte=None):
@@ -409,12 +610,11 @@ def ajouter_ligne_arriere_plan(fichier, donnees, webhook_url=None, alerte=None):
     (avec le même secours local en cas d'échec). Si `alerte` est fourni,
     le responsable est prévenu sur Telegram AVANT l'écriture (plus rapide,
     et indépendant de Google)."""
-    if alerte:
-        noter_evenement(alerte)
+    evt_id = noter_evenement(alerte) if alerte else None
 
     def tache():
         if alerte:
-            notifier_responsable(alerte)
+            notifier_responsable(alerte, evt_id)
         try:
             ajouter_ligne(fichier, donnees, webhook_url=webhook_url)
             lancer_rafraichissement(webhook_url, fichier)  # le tableau de bord verra la nouvelle ligne
@@ -1164,7 +1364,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-13f"
+VERSION = "2026-10-15a"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
@@ -1178,17 +1378,58 @@ def api_evenements():
     return jsonify({"ok": True, "evenements": liste}), 200
 
 
+@app.route("/admin/api/push-cle", methods=["GET"])
+def api_push_cle():
+    if not _admin_ok():
+        return jsonify({"ok": False}), 401
+    return jsonify({"ok": True, "cle": VAPID_PUBLIC if push_configure() else ""}), 200
+
+
+@app.route("/admin/api/abonner", methods=["POST"])
+def api_abonner():
+    if not _admin_ok():
+        return jsonify({"ok": False, "message": "Accès refusé"}), 401
+    if not push_configure():
+        return jsonify({"ok": False, "message": "Notifications non configurées sur le serveur."}), 200
+    ok, msg = ajouter_abonnement(request.get_json(silent=True) or {})
+    return jsonify({"ok": ok, "message": msg}), 200
+
+
+@app.route("/admin/api/desabonner", methods=["POST"])
+def api_desabonner():
+    if not _admin_ok():
+        return jsonify({"ok": False}), 401
+    retirer_abonnement(str((request.get_json(silent=True) or {}).get("endpoint", "")))
+    return jsonify({"ok": True}), 200
+
+
+@app.route("/admin/api/vu", methods=["POST"])
+def api_vu():
+    """« J'ai vu » : arrête les rappels de notification."""
+    if not _admin_ok():
+        return jsonify({"ok": False}), 401
+    with _verrou_evt:
+        _dernier_vu["id"] = _evenements[-1]["id"] if _evenements else int(time.time() * 1000)
+    return jsonify({"ok": True}), 200
+
+
 @app.route("/admin/api/test-notif", methods=["POST"])
 def api_test_notif():
     """Envoie une alerte de test (bouton du tableau de bord)."""
     if not _admin_ok():
         return jsonify({"ok": False, "message": "Accès refusé"}), 401
-    if not (ALERTE_EMAIL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)):
+    canaux = []
+    if push_configure():
+        _charger_abonnements()
+        canaux.append("notification téléphone" if _abonnements else "notification téléphone (AUCUN appareil abonné : activez-la d'abord)")
+    if ALERTE_EMAIL: canaux.append("e-mail")
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID: canaux.append("Telegram")
+    if not canaux:
         return jsonify({"ok": False, "message":
-            "Aucune alerte configurée : ajoutez ALERTE_EMAIL=1 sur Render (après avoir mis à jour le script Google)."}), 200
-    ok = notifier_responsable("✅ Test d'alerte : si vous lisez ceci, vous serez prévenu à chaque commande.")
-    return jsonify({"ok": ok, "message": "Alerte envoyée : regardez votre boîte e-mail (et les spams)." if ok
-                    else "Échec : " + (_etat_notif.get("email_erreur") or _etat_notif.get("erreur") or "inconnu")}), 200
+            "Aucune alerte configurée : voir GUIDE_DEPLOIEMENT.md (notifications téléphone / e-mail)."}), 200
+    ok = notifier_responsable("✅ Test d'alerte\nSi vous voyez ceci, vous serez prévenu à chaque commande.")
+    return jsonify({"ok": ok, "message": ("Alerte envoyée par : " + ", ".join(canaux) + ".") if ok
+                    else "Échec (" + ", ".join(canaux) + ") : " + (_etat_push.get("erreur") or _etat_notif.get("email_erreur") or _etat_notif.get("erreur") or "aucun envoi réussi")}), 200
 _heure_lectures = {}  # clé -> heure de départ de la lecture en cours
 
 
@@ -1398,6 +1639,7 @@ def api_dashboard():
         "stock_resume": stock_resume,
         "journal_ecritures": list(reversed(_journal_ecritures)),
         "ia": dict(_etat_ia, modeles=[GROQ_MODEL] + [m for m in MODELES_SECOURS if m != GROQ_MODEL]),
+        "push": dict(_etat_push, configure=push_configure(), appareils=len(_abonnements)),
         "notif": dict(_etat_notif, configure=bool(ALERTE_EMAIL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)),
                       email=ALERTE_EMAIL, telegram=bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)),
     }), 200
@@ -1409,6 +1651,15 @@ def page_admin():
     """Page du tableau de bord (la page elle-même est publique mais vide :
     les données exigent le mot de passe)."""
     return app.send_static_file("admin.html")
+
+
+@app.route("/sw.js", methods=["GET"])
+def service_worker_racine():
+    """Service worker servi à la racine (portée « / ») : nécessaire pour les notifications."""
+    rep = app.send_static_file("sw.js")
+    rep.headers["Service-Worker-Allowed"] = "/"
+    rep.headers["Cache-Control"] = "no-cache"
+    return rep
 
 
 @app.route("/sante", methods=["GET", "HEAD"])
