@@ -110,8 +110,16 @@ if VAPID_SUJET and not VAPID_SUJET.startswith(("mailto:", "https:")):
 HOTES_PUSH_AUTORISES = (".googleapis.com", ".push.services.mozilla.com", ".push.apple.com",
                         ".notify.windows.com", ".mozilla.com", ".mozaws.net")
 NB_ABONNEMENTS_MAX = 12
-NB_RAPPELS = 3            # rappels toutes les 60 s tant que « J'ai vu » n'a pas été appuyé
-INTERVALLE_RAPPEL = 60
+def _entier_env(nom, defaut, mini, maxi):
+    try:
+        return max(mini, min(maxi, int(os.environ.get(nom, defaut))))
+    except (TypeError, ValueError):
+        return defaut
+
+
+# Rappels tant que « J'ai vu » n'a pas été appuyé (modifiables sur Render sans toucher au code)
+NB_RAPPELS = _entier_env("PUSH_NB_RAPPELS", 8, 0, 20)             # 8 rappels...
+INTERVALLE_RAPPEL = _entier_env("PUSH_INTERVALLE_SECONDES", 30, 10, 300)   # ...toutes les 30 s (= 4 minutes d'insistance)
 _abonnements = {}         # endpoint -> {"endpoint", "keys": {"p256dh", "auth"}}
 _verrou_abo = threading.Lock()
 _abo_charges = {"fait": False}
@@ -1364,7 +1372,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-15a"
+VERSION = "2026-10-15b"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
