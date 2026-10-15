@@ -18,6 +18,7 @@ self.addEventListener("push", (event) => {
     tag: "commande-" + (d.id || Date.now()),
     renotify: true,                    // sonne à chaque nouveau message, même avec le même repère
     requireInteraction: true,          // reste affichée jusqu'à ce que vous la touchiez (Android, ordinateur)
+    silent: false,                     // demande explicitement le son et la vibration de la notification
     vibrate: [400, 150, 400, 150, 400, 150, 800],
     data: { url: "/admin" }
   }));
