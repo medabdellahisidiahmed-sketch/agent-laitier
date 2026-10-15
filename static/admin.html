@@ -118,6 +118,7 @@
   @keyframes flash { 0%,60% { box-shadow:0 0 0 3px var(--bleu); } 100% { box-shadow:0 0 0 0 transparent; } }
   .flash { animation:flash 1.6s ease-out; }
   #alarme { position:sticky; top:0; z-index:20; background:var(--rouge); color:#fff; padding:12px 14px; display:flex; gap:12px; align-items:center; justify-content:space-between; animation:clignote 1s steps(2) infinite; }
+  #avis-son { background:#FFF1DB; color:var(--orange); padding:10px 14px; font-size:14px; text-align:center; }
   #alarme-texte { white-space:pre-line; font-size:14px; line-height:1.4; max-height:30vh; overflow:auto; }
   #alarme button { flex:none; background:#fff; color:var(--rouge); border:none; border-radius:10px; padding:12px 14px; font-weight:700; font-size:15px; }
   @keyframes clignote { 50% { background:#E0554A; } }
@@ -146,6 +147,7 @@
       <button id="actualiser" aria-label="Actualiser">↻ Actualiser</button>
     </div>
   </header>
+  <div id="avis-son" hidden>🔈 Touchez l'écran une fois pour activer le son de l'alarme.</div>
   <div id="alarme" hidden role="alert">
     <div id="alarme-texte"></div>
     <button id="alarme-ok" type="button">✔ J'ai vu</button>
@@ -536,10 +538,25 @@
 
   // ---------- Alarme sonore : bip répété jusqu'à « J'ai vu » ----------
   let ctxAudio = null, minuteurAlarme = null, minuteurEvt = null, verrouEcran = null, nouveaux = [];
+  function sonPret(){ return !!ctxAudio && ctxAudio.state === "running"; }
+  function majAvisSon(){ $("avis-son").hidden = !(lire("admin_son") === "1" && !sonPret()); }
+  function debloquerSon(){
+    // À appeler dans un geste de l'utilisateur (touche, clic) : le navigateur n'autorise le son qu'à ce moment.
+    try {
+      ctxAudio = ctxAudio || new (window.AudioContext || window.webkitAudioContext)();
+      const fin = () => majAvisSon();
+      const p = ctxAudio.resume(); if (p && p.then) p.then(fin, fin);
+      const tampon = ctxAudio.createBuffer(1, 1, 22050), src = ctxAudio.createBufferSource();
+      src.buffer = tampon; src.connect(ctxAudio.destination); src.start(0);   // petit son muet qui « réveille » l'audio sur iPhone
+    } catch(e) {}
+    majAvisSon();
+  }
+  ["pointerdown", "touchstart", "touchend", "click", "keydown"].forEach(ev =>
+    document.addEventListener(ev, () => { if (lire("admin_son") === "1" && !sonPret()) debloquerSon(); }, { passive: true }));
   function bip(){
     try {
-      if (!ctxAudio) return;
-      if (ctxAudio.state === "suspended") ctxAudio.resume();
+      if (!ctxAudio) { majAvisSon(); return; }
+      if (ctxAudio.state !== "running") { ctxAudio.resume(); majAvisSon(); }
       [0, 0.28, 0.56].forEach(dec => {
         const o = ctxAudio.createOscillator(), g = ctxAudio.createGain();
         o.type = "square"; o.frequency.value = 880; o.connect(g); g.connect(ctxAudio.destination);
@@ -568,7 +585,7 @@
   function declencherAlarme(liste){
     nouveaux = nouveaux.concat(liste);
     const n = nouveaux.length;
-    $("alarme-texte").textContent = (ctxAudio ? "" : "🔈 Touchez l'écran une fois pour activer le son\n") + (n > 1 ? n + " nouveaux événements — dernier :\n" : "") + nouveaux[nouveaux.length - 1].texte;
+    $("alarme-texte").textContent = (sonPret() ? "" : "🔈 Touchez l'écran pour activer le son\n") + (n > 1 ? n + " nouveaux événements — dernier :\n" : "") + nouveaux[nouveaux.length - 1].texte;
     $("alarme").hidden = false; document.title = "🔔 (" + n + ") Nouvelle commande";
     if (!minuteurAlarme) { bip(); minuteurAlarme = setInterval(bip, 3000); }
     charger(true, true);   // met aussi à jour les chiffres et les listes
@@ -593,18 +610,18 @@
     if (lire("admin_son") === "1") { minuteurEvt = setInterval(verifierEvenements, 10000); verifierEvenements(); garderEcranAllume(); }
   }
   $("son").onclick = () => {
-    if (lire("admin_son") === "1") { ecrire("admin_son", ""); clearInterval(minuteurEvt); arreterAlarme(); try { verrouEcran && verrouEcran.release(); } catch(e) {} majBoutonSon(); return; }
-    try { ctxAudio = ctxAudio || new (window.AudioContext || window.webkitAudioContext)(); ctxAudio.resume(); } catch(e) {}
-    ecrire("admin_son", "1"); majBoutonSon(); bip(); demarrerSurveillance();
+    if (lire("admin_son") === "1") { ecrire("admin_son", ""); clearInterval(minuteurEvt); arreterAlarme(); try { verrouEcran && verrouEcran.release(); } catch(e) {} majBoutonSon(); majAvisSon(); return; }
+    ecrire("admin_son", "1"); debloquerSon(); majBoutonSon(); bip(); demarrerSurveillance();
   };
   $("alarme-ok").onclick = arreterAlarme;
+  $("alarme").addEventListener("pointerdown", () => { if (!sonPret()) { debloquerSon(); bip(); } });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { garderEcranAllume(); verifierEvenements(); } });
   majBoutonSon();
 
   jeton = lire("admin_jeton");
   if (jeton) ouvrir();
-  // Après un rechargement de la page, le navigateur exige un nouvel appui pour réactiver le son
-  if (lire("admin_son") === "1") { $("son").textContent = "🔔"; document.addEventListener("click", function une(){ try { ctxAudio = ctxAudio || new (window.AudioContext || window.webkitAudioContext)(); ctxAudio.resume(); } catch(e) {} demarrerSurveillance(); document.removeEventListener("click", une); }, { once:true }); demarrerSurveillance(); }
+  // Après un rechargement, le navigateur exige un nouvel appui pour le son : on l'affiche clairement
+  if (lire("admin_son") === "1") { demarrerSurveillance(); majAvisSon(); }
 </script>
 </body>
 </html>
