@@ -222,6 +222,7 @@
   </main>
   <details id="diag" style="max-width:1180px;margin:0 auto;padding:0 14px;color:var(--gris);font-size:13px">
     <summary style="cursor:pointer;padding:8px 0">🔎 Diagnostic (enregistrements vers Google)</summary>
+    <div style="padding:4px 0" id="etat-limites"></div>
     <div style="padding:4px 0" id="etat-install"></div>
     <div style="padding:4px 0" id="etat-push"></div>
     <div style="padding:4px 0"><span id="etat-notif"></span>
@@ -369,6 +370,8 @@
       " · modèles prévus : " + (ia.modeles||[]).join(" → ") +
       (ia.requetes_restantes_jour ? " · requêtes restantes aujourd'hui (modèle courant) : " + ia.requetes_restantes_jour : "") +
       (ia.nb_plafonds ? " · plafond gratuit atteint " + ia.nb_plafonds + " fois, dernier : " + ia.dernier_plafond : " · plafond gratuit jamais atteint");
+    const li = d.limites || {};
+    $("etat-limites").textContent = "Protection anti-abus : " + (li.bloques ? li.bloques + " demande(s) bloquée(s) depuis le démarrage · dernière : " + li.derniere + " (" + li.detail + ")" : "aucune demande bloquée depuis le démarrage");
     const pu = d.push || {};
     $("etat-push").textContent = "Notifications téléphone : " + (!pu.configure ? "non configurées sur le serveur (clés VAPID absentes)"
       : pu.appareils + " appareil(s) abonné(s)" + (pu.ok === false ? " · dernier envoi ÉCHOUÉ (" + pu.erreur + ")" : pu.ok ? " · dernier envoi réussi" : ""));
