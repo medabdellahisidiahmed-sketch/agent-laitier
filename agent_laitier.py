@@ -1097,6 +1097,88 @@ PAGE_ADMIN_PRODUITS = """<!DOCTYPE html>
 
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024   # refuse toute requête de plus de 100 Ko
+
+
+# ============================================================
+# PROTECTION CONTRE LES ABUS (limites, doublons, tailles)
+# Tout est en mémoire : gratuit, rien à installer. Les limites sont
+# volontairement larges pour un vrai client et étroites pour un spammeur.
+# ============================================================
+from collections import deque
+
+
+def _entier_limite(nom, defaut):
+    try:
+        return max(1, int(os.environ.get(nom, defaut)))
+    except (TypeError, ValueError):
+        return defaut
+
+
+LIM_CHAT_GLOBAL_MIN = _entier_limite("LIM_CHAT_GLOBAL_MIN", 25)     # 25 messages de chat/minute pour tout le monde (quota gratuit de l'IA : 30/min)
+LIM_CHAT_IP_MIN = _entier_limite("LIM_CHAT_IP_MIN", 20)       # large : plusieurs clients peuvent partager la même adresse (réseau mobile)
+LIM_CHAT_ID_MIN = _entier_limite("LIM_CHAT_ID_MIN", 8)        # par appareil : plus serré
+LIM_CHAT_IP_JOUR = _entier_limite("LIM_CHAT_IP_JOUR", 400)
+LIM_IA_JOUR = _entier_limite("LIM_IA_JOUR", 800)                    # on garde de la marge sous les 1 000 requêtes/jour gratuites
+LIM_CMD_GLOBAL_MIN = _entier_limite("LIM_CMD_GLOBAL_MIN", 60)
+LIM_CMD_IP_MIN = _entier_limite("LIM_CMD_IP_MIN", 30)
+LIM_CMD_TEL_MIN = _entier_limite("LIM_CMD_TEL_MIN", 6)
+LIM_CMD_TEL_JOUR = _entier_limite("LIM_CMD_TEL_JOUR", 60)
+MAX_MESSAGE_CHAT = 600       # caractères
+MAX_LIGNES_COMMANDE = 40     # produits différents dans une commande
+MAX_QTE_LIGNE = 1000
+DELAI_DOUBLON_S = 90         # même commande identique renvoyée en moins de 90 s = doublon
+
+
+class _Limiteur:
+    """Fenêtre glissante : « au plus N événements pour cette clé pendant S secondes »."""
+    def __init__(self):
+        self._v, self._verrou = {}, threading.Lock()
+
+    def tenter(self, cle, maximum, fenetre):
+        maintenant = time.time()
+        with self._verrou:
+            q = self._v.setdefault(cle, deque())
+            while q and q[0] <= maintenant - fenetre:
+                q.popleft()
+            if len(q) >= maximum:
+                return False, int(q[0] + fenetre - maintenant) + 1
+            q.append(maintenant)
+            if len(self._v) > 5000:                       # nettoyage : on oublie les clés vides
+                for k in [k for k, d in self._v.items() if not d]:
+                    del self._v[k]
+            return True, 0
+
+
+_limiteur = _Limiteur()
+_etat_limites = {"bloques": 0, "derniere": "", "detail": ""}
+_doublons = {}   # empreinte de commande -> heure
+_verrou_doublons = threading.Lock()
+
+
+def _ip_client():
+    """Adresse du visiteur (Render la place dans X-Forwarded-For)."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    return (xff.split(",")[0].strip() if xff else request.remote_addr) or "?"
+
+
+def _bloquer(raison, attente=0):
+    _etat_limites["bloques"] += 1
+    _etat_limites["derniere"] = datetime.now().strftime("%d/%m %H:%M:%S")
+    _etat_limites["detail"] = raison
+    print(f"[ABUS] bloqué : {raison} (ip {_ip_client()})")
+
+
+def _depassement(cle, maximum, fenetre):
+    """Renvoie (True, secondes_a_attendre) si la limite est dépassée."""
+    ok, attente = _limiteur.tenter(cle, maximum, fenetre)
+    if not ok:
+        _bloquer(cle)
+    return (not ok), attente
+
+
+def _texte_attente(secondes):
+    return "quelques secondes" if secondes <= 20 else ("environ 1 minute" if secondes <= 90 else f"{secondes // 60 + 1} minutes")
 
 
 @app.route("/webhook", methods=["GET"])
@@ -1141,11 +1223,26 @@ def chat_web():
     """Canal chat web (PWA) : reçoit un message depuis la page HTML,
     renvoie directement la réponse en JSON, sans passer par WhatsApp."""
     data = request.get_json(silent=True) or {}
-    id_client = data.get("id_client", "web-anonyme")
-    message = (data.get("message") or "").strip()
+    id_client = str(data.get("id_client", "web-anonyme"))[:60]
+    message = str(data.get("message") or "").strip()
 
     if not message:
         return jsonify({"reponse": "Message vide."}), 400
+    if len(message) > MAX_MESSAGE_CHAT:
+        return jsonify({"reponse": f"Message trop long (maximum {MAX_MESSAGE_CHAT} caractères). "
+                        "Écrivez plus court, ou utilisez l'onglet « Commander »."}), 200
+
+    ip = _ip_client()
+    for cle, maxi, fen in (("chat:global", LIM_CHAT_GLOBAL_MIN, 60), ("chat:ip:" + ip, LIM_CHAT_IP_MIN, 60),
+                           ("chat:id:" + id_client, LIM_CHAT_ID_MIN, 60), ("chat:ipjour:" + ip, LIM_CHAT_IP_JOUR, 86400),
+                           ("ia:jour", LIM_IA_JOUR, 86400)):
+        depasse, attente = _depassement(cle, maxi, fen)
+        if depasse:
+            if cle == "ia:jour":
+                return jsonify({"reponse": "Le chat est indisponible pour aujourd'hui. 🙏 "
+                                "Pour commander, utilisez l'onglet « Commander » (les boutons)."}), 200
+            return jsonify({"reponse": "Vous écrivez trop vite. 🙏 Réessayez dans "
+                            + _texte_attente(attente) + ", ou utilisez l'onglet « Commander »."}), 200
 
     try:
         resultat = generer_reponse(id_client, message, _client_depuis(data))
@@ -1173,31 +1270,62 @@ def commander():
     ne peut pas tricher sur les prix."""
     from datetime import timedelta
     data = request.get_json(silent=True) or {}
-    id_client = (data.get("id_client") or "web-anonyme")[:60]
+    id_client = str(data.get("id_client") or "web-anonyme")[:60]
     lignes = data.get("lignes") or []
     jour = data.get("livraison", "demain")
     client = _client_depuis(data)
     if not _client_valide(client):
         return jsonify({"ok": False, "profil_requis": True, "message":
             "Pour livrer votre commande, écrivez d'abord le nom de votre boutique et votre téléphone."}), 200
+    if not isinstance(lignes, list) or len(lignes) > MAX_LIGNES_COMMANDE:
+        return jsonify({"ok": False, "message": f"Commande trop grande (maximum {MAX_LIGNES_COMMANDE} produits différents). "
+                        "Séparez-la en deux commandes."}), 200
+
+    ip = _ip_client()
+    for cle, maxi, fen in (("cmd:global", LIM_CMD_GLOBAL_MIN, 60), ("cmd:ip:" + ip, LIM_CMD_IP_MIN, 60),
+                           ("cmd:tel:" + client["tel"], LIM_CMD_TEL_MIN, 60), ("cmd:teljour:" + client["tel"], LIM_CMD_TEL_JOUR, 86400)):
+        depasse, attente = _depassement(cle, maxi, fen)
+        if depasse:
+            return jsonify({"ok": False, "message": "Trop de commandes envoyées en peu de temps. "
+                            "Réessayez dans " + _texte_attente(attente) + "."}), 200
+
+    # Doublon : même client, mêmes produits, envoyé deux fois (double appui, mauvaise connexion...)
+    empreinte = client["tel"] + "|" + jour + "|" + ";".join(sorted(
+        f"{l.get('produit')}x{l.get('quantite')}" for l in lignes if isinstance(l, dict)))
+    maintenant = time.time()
+    with _verrou_doublons:
+        for k in [k for k, t in _doublons.items() if t < maintenant - DELAI_DOUBLON_S]:
+            del _doublons[k]
+        if empreinte in _doublons:
+            _bloquer("doublon de commande")
+            return jsonify({"ok": False, "message": "Cette commande vient déjà d'être envoyée. "
+                            "Elle est bien enregistrée, pas besoin de la renvoyer. ✅"}), 200
+        _doublons[empreinte] = maintenant
 
     stock = {p["produit"]: p for p in lire_stock()}
     total, resume = 0, []
     for l in lignes:
+        if not isinstance(l, dict):
+            continue
         produit = stock.get(l.get("produit"))
         try:
             qte = int(l.get("quantite", 0))
         except (TypeError, ValueError):
             qte = 0
-        if not produit or qte <= 0:
+        if not isinstance(l, dict) or not produit or qte <= 0:
             continue
+        if qte > MAX_QTE_LIGNE:
+            _doublons.pop(empreinte, None)
+            return jsonify({"ok": False, "message": f"Quantité trop grande (maximum {MAX_QTE_LIGNE} par produit)."}), 200
         if qte > produit["stock_disponible"]:
+            _doublons.pop(empreinte, None)   # la commande a échoué : le client peut la corriger et renvoyer
             return jsonify({"ok": False, "message":
                 f"Désolé, il reste seulement {produit['stock_disponible']} {produit['produit']}."}), 200
         total += qte * produit["prix_unitaire_mru"]
         resume.append(f"{qte} x {produit['produit']}")
 
     if not resume:
+        _doublons.pop(empreinte, None)
         return jsonify({"ok": False, "message": "Aucun produit choisi."}), 200
 
     date_liv = datetime.now() + timedelta(days=0 if jour == "aujourdhui" else 1)
@@ -1372,7 +1500,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-15c"
+VERSION = "2026-10-19a"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
@@ -1647,6 +1775,7 @@ def api_dashboard():
         "stock_resume": stock_resume,
         "journal_ecritures": list(reversed(_journal_ecritures)),
         "ia": dict(_etat_ia, modeles=[GROQ_MODEL] + [m for m in MODELES_SECOURS if m != GROQ_MODEL]),
+        "limites": dict(_etat_limites),
         "push": dict(_etat_push, configure=push_configure(), appareils=len(_abonnements)),
         "notif": dict(_etat_notif, configure=bool(ALERTE_EMAIL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)),
                       email=ALERTE_EMAIL, telegram=bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)),
