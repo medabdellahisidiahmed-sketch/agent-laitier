@@ -222,6 +222,7 @@
   </main>
   <details id="diag" style="max-width:1180px;margin:0 auto;padding:0 14px;color:var(--gris);font-size:13px">
     <summary style="cursor:pointer;padding:8px 0">🔎 Diagnostic (enregistrements vers Google)</summary>
+    <div style="padding:4px 0" id="etat-install"></div>
     <div style="padding:4px 0" id="etat-push"></div>
     <div style="padding:4px 0"><span id="etat-notif"></span>
       <button id="btn-notif" type="button" style="margin-left:6px;padding:4px 10px;border:1px solid var(--gris);border-radius:8px;background:none;color:inherit;cursor:pointer">Tester l'alerte</button></div>
@@ -722,6 +723,15 @@
     try { await invitationInstall.userChoice; } catch(e) {}
     invitationInstall = null; $("avis-install").hidden = true;
   };
+  function majInstall(){
+    const sw = navigator.serviceWorker && navigator.serviceWorker.controller ? "actif" : "pas encore actif";
+    $("etat-install").textContent = "Installation : " + (dejaInstallee() ? "ouvert comme application installée"
+      : invitationInstall ? "Chrome propose l'installation (bouton vert)"
+      : "Chrome ne propose pas l'installation (application peut-être déjà installée, ou refus récent)")
+      + " · adresse : " + location.pathname + " · service worker : " + sw;
+  }
+  window.addEventListener("beforeinstallprompt", majInstall); window.addEventListener("appinstalled", majInstall);
+  setTimeout(majInstall, 3000); setInterval(majInstall, 10000);
   // Si Chrome ne propose pas le bouton « Installer », on explique comment installer à la main
   $("btn-manuel-ok").onclick = () => { $("avis-manuel").hidden = true; ecrire("admin_install_vu", "1"); };
   setTimeout(() => {
