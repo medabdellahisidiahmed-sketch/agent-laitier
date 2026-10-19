@@ -4,7 +4,7 @@
   "short_name": "Tableau de bord",
   "description": "Suivi des commandes et alertes du distributeur laitier",
   "start_url": "/admin",
-  "scope": "/",
+  "scope": "/admin",
   "display": "standalone",
   "background_color": "#F4F6FA",
   "theme_color": "#1B4D8C",
