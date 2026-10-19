@@ -1372,7 +1372,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-15b"
+VERSION = "2026-10-15c"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
@@ -1659,6 +1659,14 @@ def page_admin():
     """Page du tableau de bord (la page elle-même est publique mais vide :
     les données exigent le mot de passe)."""
     return app.send_static_file("admin.html")
+
+
+@app.before_request
+def redirection_admin_statique():
+    """Une seule adresse pour le tableau de bord : /admin (utile pour l'installation comme application)."""
+    if request.path == "/static/admin.html":
+        from flask import redirect
+        return redirect("/admin", code=302)
 
 
 @app.route("/sw.js", methods=["GET"])
