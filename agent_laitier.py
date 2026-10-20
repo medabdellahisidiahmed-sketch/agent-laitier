@@ -692,6 +692,14 @@ Si COMMANDE ou QUESTION_STOCK_PRIX :
 - Dès que les produits et quantités sont clairs (même si tu demandes encore
   une confirmation au client), remplis commande_structuree avec TOUS les
   détails calculés
+- Tu as la mémoire de la conversation (section HISTORIQUE) : ne redemande JAMAIS
+  une information que le client a déjà donnée (produits, quantités, date).
+  Quand le client ne fait que répondre à ta question (ex. une date), garde les
+  produits déjà convenus dans commande_structuree.
+- "commande_finale" = true UNIQUEMENT quand le client a donné les produits, les
+  quantités ET la date de livraison (ou confirme explicitement). Sinon false.
+  N'écris "commande enregistrée" dans reponse_client que si commande_finale est true ;
+  sinon demande ce qui manque (la date de livraison en général).
 
 Si RECLAMATION ou CREDIT_PAIEMENT :
 - Ne JAMAIS traiter la demande toi-même
@@ -700,6 +708,9 @@ Si RECLAMATION ou CREDIT_PAIEMENT :
 
 STOCK ACTUEL :
 {stock}
+
+HISTORIQUE RÉCENT DE LA CONVERSATION (du plus ancien au plus récent) :
+{historique}
 
 MESSAGE DU CLIENT :
 {message}
@@ -711,6 +722,7 @@ sans jamais les changer ni en inventer d'autres :
   "categorie": "COMMANDE" ou "QUESTION_STOCK_PRIX" ou "RECLAMATION" ou "CREDIT_PAIEMENT" ou "AUTRE",
   "reponse_client": "texte de la réponse à envoyer au client",
   "escalade_humain": true ou false,
+  "commande_finale": true ou false,
   "commande_structuree": null si pas de commande, sinon exactement :
     {{
       "produits": [
@@ -738,7 +750,23 @@ MODELES_SECOURS = [m.strip() for m in os.environ.get(
 _etat_ia = {"modele": "", "requetes_restantes_jour": None, "dernier_plafond": "", "nb_plafonds": 0}
 
 
-def demander_a_ia(message_client, stock, max_essais=2):
+def _texte_historique(historique):
+    """Met en forme (et nettoie) les derniers échanges envoyés par l'appli client."""
+    lignes = []
+    for h in (historique if isinstance(historique, list) else [])[-8:]:
+        if not isinstance(h, dict):
+            continue
+        qui = "Assistant" if h.get("r") == "a" else "Client"
+        texte = re.sub(r"\s+", " ", str(h.get("t", ""))).strip()[:600]
+        if texte:
+            lignes.append(f"{qui} : {texte}")
+    return "\n".join(lignes) or "(début de la conversation)"
+
+
+_commandes_chat_vues = {}   # empreinte -> heure : évite d'enregistrer 2 fois la même commande chat
+
+
+def demander_a_ia(message_client, stock, max_essais=2, historique=None):
     """Envoie le prompt à Groq (API compatible OpenAI) et renvoie le JSON
     déjà décodé (dictionnaire Python), prêt à utiliser.
     Essaie d'abord GROQ_MODEL, puis les modèles de secours si la limite
@@ -750,6 +778,7 @@ def demander_a_ia(message_client, stock, max_essais=2):
         stock=json.dumps([{k: v for k, v in p.items() if k not in ("photo", "seuil")} for p in stock],
                          ensure_ascii=False, separators=(",", ":")),
         message=message_client,
+        historique=_texte_historique(historique),
     )
 
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -911,13 +940,13 @@ def _recalculer_commande(commande, stock):
     return total, resume, remarques
 
 
-def generer_reponse(identifiant_client, texte_client, client=None):
+def generer_reponse(identifiant_client, texte_client, client=None, historique=None):
     """Cœur commun à TOUS les canaux (WhatsApp, chat web, Telegram plus tard...).
     Interroge l'IA, journalise commande/alerte, renvoie le résultat complet.
     Ne s'occupe PAS d'envoyer le message : c'est au code appelant de choisir
     comment (WhatsApp, réponse HTTP directe, etc.)."""
     stock = lire_stock()
-    resultat = demander_a_ia(texte_client, stock)
+    resultat = demander_a_ia(texte_client, stock, historique=historique)
 
     categorie = resultat.get("categorie", "AUTRE")
     reponse_client = resultat.get("reponse_client", "")
@@ -936,6 +965,8 @@ def generer_reponse(identifiant_client, texte_client, client=None):
             "Reponse": reponse_client,
         }, webhook_url=ALERTES_WEBHOOK_URL,
             alerte=_texte_alerte(categorie, champs, "💬 " + texte_client[:500]))
+    elif commande and resultat.get("commande_finale") is not True:
+        print("[IA] commande en cours (pas encore finale) : rien n'est enregistré.")
     elif commande:
         total_ia = commande.get("total_commande_mru", "")
         total, resume, remarques = _recalculer_commande(commande, stock)
@@ -947,6 +978,15 @@ def generer_reponse(identifiant_client, texte_client, client=None):
             remarques.append(f"total de l'IA ({total_ia}) corrigé en {total}")
             if resume:   # le client voit le vrai total
                 resultat["reponse_client"] = reponse_client + f"\n\n(Total vérifié : {total} MRU)"
+        empreinte = identifiant_client + "|" + ",".join(sorted(resume))
+        maintenant = time.time()
+        for k in [k for k, t in _commandes_chat_vues.items() if maintenant - t > 600]:
+            _commandes_chat_vues.pop(k, None)
+        if resume and empreinte in _commandes_chat_vues:
+            print("[IA] même commande déjà enregistrée il y a moins de 10 min : ignorée.")
+            return resultat
+        if resume:
+            _commandes_chat_vues[empreinte] = maintenant
         detail = "📝 " + texte_client[:500]
         if resume:
             detail += "\n🧾 " + " · ".join(resume)
@@ -1308,7 +1348,7 @@ def chat_web():
                             + _texte_attente(attente) + ", ou utilisez l'onglet « Commander »."}), 200
 
     try:
-        resultat = generer_reponse(id_client, message, _client_depuis(data))
+        resultat = generer_reponse(id_client, message, _client_depuis(data), data.get("historique"))
         return jsonify({"reponse": resultat.get("reponse_client", "")}), 200
     except PlafondIA as e:
         print("[IA] plafond gratuit atteint sur tous les modèles")
@@ -1578,7 +1618,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-21c"
+VERSION = "2026-10-21d"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
