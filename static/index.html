@@ -310,6 +310,7 @@
     return div;
   }
 
+  const historique = [];   // derniers échanges, renvoyés au serveur pour que l'IA se souvienne
   // Message d'accueil
   ajouterBulle("Bonjour ! Écrivez-moi votre commande ou votre question (produits, prix, livraison).", "agent");
 
@@ -328,11 +329,12 @@
       const reponse = await fetch("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id_client: idClient, message: message, client: donneesClient() })
+        body: JSON.stringify({ id_client: idClient, message: message, client: donneesClient(), historique: historique.slice(-8) })
       });
       const data = await reponse.json();
       bulleAttente.remove();
       ajouterBulle(data.reponse || "Désolé, une erreur est survenue.", "agent");
+      if (data.reponse) { historique.push({ r: "c", t: message }, { r: "a", t: data.reponse }); }
     } catch (err) {
       bulleAttente.remove();
       ajouterBulle("Connexion impossible. Réessayez dans un instant.", "agent");
