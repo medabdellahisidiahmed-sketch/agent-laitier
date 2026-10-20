@@ -24,6 +24,7 @@ import time
 import threading
 import base64
 import struct
+import html as _html
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
@@ -348,6 +349,22 @@ def _texte_alerte(type_, client_champs, details, total=None):
 # ============================================================
 # 2. LECTURE / ÉCRITURE DU STOCK
 # ============================================================
+def _photo_sure(valeur):
+    """N'accepte comme photo qu'une image data:image/(jpeg|png|webp|gif);base64 ou une adresse
+    https:// / chemin /static/. Tout le reste (javascript:, guillemets, balises...) devient vide."""
+    v = str(valeur or "").strip()
+    if re.fullmatch(r"data:image/(jpeg|png|webp|gif);base64,[A-Za-z0-9+/=]+", v):
+        return v
+    if re.fullmatch(r"(https://|/static/)[A-Za-z0-9._~:/?#\[\]@!$&()*+,;=%-]+", v):
+        return v
+    return ""
+
+
+def _avec_cle(donnees):
+    """Ajoute la clé secrète à l'envoi vers Google (jamais dans les fichiers locaux)."""
+    return dict(donnees, _cle=SHEETS_CLE) if SHEETS_CLE else donnees
+
+
 def _normaliser_cle(cle):
     """Rend la comparaison des en-têtes de colonnes insensible aux accents/espaces."""
     remplacements = {"é": "e", "è": "e", "ê": "e", "à": "a"}
@@ -436,7 +453,7 @@ def _lire_stock_via_script():
                 "stock_disponible": entier("stock disponible"),
                 "prix_unitaire_mru": entier("prix unitaire (mru)"),
                 "unite": str(valeurs.get("unite", "")).strip(),
-                "photo": str(valeurs.get("photo", "")).strip(),
+                "photo": _photo_sure(valeurs.get("photo", "")),
                 "code": str(valeurs.get("code", "")).strip(),
             })
         return stock
@@ -489,7 +506,7 @@ def _lire_stock_brut():
                     "stock_disponible": stock_dispo,
                     "prix_unitaire_mru": prix,
                     "unite": valeurs.get("unite", "").strip(),
-                    "photo": valeurs.get("photo", "").strip(),
+                    "photo": _photo_sure(valeurs.get("photo", "")),
                     "code": valeurs.get("code", "").strip(),
                 })
             if stock:
@@ -531,7 +548,7 @@ def _rejouer_secours(fichier, webhook_url):
         restantes = []
         for l in lignes:
             try:
-                r = requests.post(webhook_url, json=json.loads(l), timeout=45)
+                r = requests.post(webhook_url, json=_avec_cle(json.loads(l)), timeout=45)
                 ok, _ = _analyser_reponse_webhook(r)
             except Exception:
                 ok = False
@@ -565,7 +582,7 @@ def ajouter_ligne(fichier, donnees, webhook_url=None):
     if webhook_url:
         try:
             # Écriture en arrière-plan : personne n'attend, on peut être patient
-            r = requests.post(webhook_url, json=donnees, timeout=45)
+            r = requests.post(webhook_url, json=_avec_cle(donnees), timeout=45)
             succes, resume = _analyser_reponse_webhook(r)
             if succes:
                 print(f"[SHEETS] OK ({nom}) : ligne ajoutée dans Google Sheets.")
@@ -946,10 +963,11 @@ def _page_html_donnees(titre, enregistrements, colonnes):
             valeur = enr
             for partie in col.split("."):
                 valeur = valeur.get(partie, "") if isinstance(valeur, dict) else ""
-            cellules += f"<td>{valeur}</td>"
+            cellules += f"<td>{_html.escape(str(valeur))}</td>"
         lignes_html += f"<tr>{cellules}</tr>"
 
-    entetes = "".join(f"<th>{c}</th>" for c in colonnes)
+    entetes = "".join(f"<th>{_html.escape(str(c))}</th>" for c in colonnes)
+    titre = _html.escape(str(titre))
     return f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
 <title>{titre}</title>
 <style>
@@ -1368,6 +1386,8 @@ def admin_produits_enregistrer():
     if not nom:
         return jsonify({"ok": False, "message": "Nom du produit manquant."}), 200
     photo = d.get("photo") or ""
+    if photo and not _photo_sure(photo):
+        return jsonify({"ok": False, "message": "Photo refusée : format non valide."}), 200
     if len(photo) > 48000:
         return jsonify({"ok": False, "message": "Photo trop lourde, choisissez-en une autre."}), 200
 
@@ -1381,7 +1401,7 @@ def admin_produits_enregistrer():
         "Code": d.get("code", ""),
     }
     try:
-        r = requests.post(STOCK_WEBHOOK_URL, json=envoi, timeout=20)
+        r = requests.post(STOCK_WEBHOOK_URL, json=_avec_cle(envoi), timeout=20)
         succes, resume = _analyser_reponse_webhook(r)
         print(f"[STOCK] {envoi['action']} {nom} : {'OK' if succes else 'ÉCHEC ' + resume}")
         if succes:
@@ -1463,7 +1483,7 @@ def tester_webhooks():
                      else "NE se termine PAS par /exec ⚠️ (utilisez le lien « Application Web » du déploiement)")
             ligne["Date"] = datetime.now().isoformat(timespec="seconds")
             try:
-                r = requests.post(url, json=ligne, timeout=20)
+                r = requests.post(url, json=_avec_cle(ligne), timeout=20)
                 succes, resume = _analyser_reponse_webhook(r)
                 if succes:
                     verdict = (f"✅ Le webhook a répondu « succès ». Une ligne TEST doit maintenant "
@@ -1500,7 +1520,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-19a"
+VERSION = "2026-10-21a"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
