@@ -880,6 +880,37 @@ def _champs_client(identifiant, client):
     return {"Client": identifiant, "Telephone": tel, "Quartier": ""}
 
 
+def _recalculer_commande(commande, stock):
+    """Recalcule le total d'une commande issue du chat avec les PRIX DU CATALOGUE
+    (l'IA peut se tromper en calculant ou inventer un prix). Renvoie
+    (total, résumé, remarques) ; les produits inconnus ne sont pas comptés."""
+    par_nom = {_normaliser_cle(p["produit"]): p for p in stock}
+    total, resume, remarques = 0, [], []
+    lignes = commande.get("produits") if isinstance(commande, dict) else None
+    for l in (lignes if isinstance(lignes, list) else []):
+        if not isinstance(l, dict):
+            continue
+        nom = str(l.get("nom", "")).strip()
+        produit = par_nom.get(_normaliser_cle(nom))
+        try:
+            qte = int(float(l.get("quantite", 0)))
+        except (TypeError, ValueError):
+            qte = 0
+        if not produit:
+            remarques.append(f"produit inconnu « {nom[:40]} »")
+            continue
+        if qte <= 0:
+            continue
+        if qte > MAX_QTE_LIGNE:
+            remarques.append(f"quantité excessive ({qte} {produit['produit']}) ramenée à {MAX_QTE_LIGNE}")
+            qte = MAX_QTE_LIGNE
+        if qte > produit["stock_disponible"]:
+            remarques.append(f"{qte} {produit['produit']} demandés, stock {produit['stock_disponible']}")
+        total += qte * produit["prix_unitaire_mru"]
+        resume.append(f"{qte} x {produit['produit']}")
+    return total, resume, remarques
+
+
 def generer_reponse(identifiant_client, texte_client, client=None):
     """Cœur commun à TOUS les canaux (WhatsApp, chat web, Telegram plus tard...).
     Interroge l'IA, journalise commande/alerte, renvoie le résultat complet.
@@ -907,13 +938,27 @@ def generer_reponse(identifiant_client, texte_client, client=None):
             alerte=_texte_alerte(categorie, champs, "💬 " + texte_client[:500]))
     elif commande:
         total_ia = commande.get("total_commande_mru", "")
+        total, resume, remarques = _recalculer_commande(commande, stock)
+        try:
+            ecart = int(float(total_ia)) != total
+        except (TypeError, ValueError):
+            ecart = True
+        if ecart:
+            remarques.append(f"total de l'IA ({total_ia}) corrigé en {total}")
+            if resume:   # le client voit le vrai total
+                resultat["reponse_client"] = reponse_client + f"\n\n(Total vérifié : {total} MRU)"
+        detail = "📝 " + texte_client[:500]
+        if resume:
+            detail += "\n🧾 " + " · ".join(resume)
+        if remarques:
+            detail += "\n⚠️ À vérifier : " + " ; ".join(remarques)
         ajouter_ligne_arriere_plan(COMMANDES_FILE, {
             **champs,
-            "Message": texte_client,
-            "Total MRU": total_ia,
+            "Message": texte_client + (" [À VÉRIFIER : " + " ; ".join(remarques) + "]" if remarques else ""),
+            "Total MRU": total,
             "Livraison": commande.get("date_livraison_souhaitee", ""),
         }, webhook_url=COMMANDES_WEBHOOK_URL,
-            alerte=_texte_alerte("commande", champs, "📝 " + texte_client[:500], total_ia))
+            alerte=_texte_alerte("commande", champs, detail, total))
 
     return resultat
 
@@ -1386,6 +1431,10 @@ def admin_produits_enregistrer():
     if not nom:
         return jsonify({"ok": False, "message": "Nom du produit manquant."}), 200
     photo = d.get("photo") or ""
+    # Une photo existante (adresse https:// ou /static/) n'est jamais renvoyée : on garde celle de la feuille.
+    # Seule une NOUVELLE photo prise depuis le téléphone (data:image, réduite par la page) est acceptée.
+    if photo and not photo.startswith("data:image/"):
+        photo = ""
     if photo and not _photo_sure(photo):
         return jsonify({"ok": False, "message": "Photo refusée : format non valide."}), 200
     if len(photo) > 48000:
@@ -1421,6 +1470,15 @@ def admin_produits_enregistrer():
                     "code": str(envoi["Code"]).strip(),
                 })
             vider_cache_stock()
+            # Journal : trace de qui (adresse IP) a changé quoi, visible dans les Alertes (sans alarme)
+            if envoi["action"] == "supprimer" or photo:
+                ajouter_ligne_arriere_plan(ALERTES_FILE, {
+                    "Client": "ADMIN", "Telephone": "", "Quartier": "",
+                    "Categorie": "JOURNAL_PHOTO",
+                    "Message": ("Produit supprimé : " if envoi["action"] == "supprimer"
+                                else "Photo modifiée : ") + nom[:120],
+                    "Reponse": "IP " + _ip_client(),
+                }, webhook_url=ALERTES_WEBHOOK_URL)
             return jsonify({"ok": True, "message": "✅ Enregistré. Visible tout de suite dans l'appli des clients."}), 200
         return jsonify({"ok": False, "message": "Échec Google Sheets : " + resume}), 200
     except Exception as e:
@@ -1520,7 +1578,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-21a"
+VERSION = "2026-10-21c"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
