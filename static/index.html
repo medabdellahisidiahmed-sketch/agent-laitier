@@ -374,9 +374,12 @@
     produits.forEach(p => {
       const ligne = document.createElement("div");
       ligne.className = "produit";
-      const photo = p.photo ? `<img class="photo" src="${p.photo}" alt="">` : `<div class="photo">🥛</div>`;
-      ligne.innerHTML = photo + `<div class="info"><b></b><span></span></div>
+      ligne.innerHTML = `<div class="photo">🥛</div><div class="info"><b></b><span></span></div>
         <div class="compteur"><button class="moins">−</button><div class="qte">${quantites[p.produit] || 0}</div><button class="plus">+</button></div>`;
+      if (/^(data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+\/=]+|https:\/\/[^\s"'<>]+|\/static\/[^\s"'<>]+)$/.test(p.photo || "")) {
+        const im = document.createElement("img"); im.className = "photo"; im.alt = ""; im.src = p.photo;
+        ligne.querySelector(".photo").replaceWith(im);
+      }
       ligne.querySelector("b").textContent = p.produit;
       ligne.querySelector("span").textContent = p.prix_unitaire_mru + " MRU / " + p.unite;
       const q = ligne.querySelector(".qte");
