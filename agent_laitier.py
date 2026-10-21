@@ -334,6 +334,7 @@ def notifier_responsable(texte, evt_id=None):
 def _texte_alerte(type_, client_champs, details, total=None):
     """Texte court de l'alerte : qui, où, quoi, et un lien WhatsApp direct."""
     tel = (client_champs.get("Telephone") or "").strip()
+    wa = (client_champs.get("WhatsApp") or tel).strip()
     lignes = [("🛒 NOUVELLE COMMANDE" if type_ == "commande" else "⚠️ À TRAITER (" + type_ + ")"),
               f"👤 {client_champs.get('Client', '')}"]
     if client_champs.get("Quartier"):
@@ -344,7 +345,7 @@ def _texte_alerte(type_, client_champs, details, total=None):
     if total not in (None, ""):
         lignes.append(f"💰 {total} MRU")
     if tel:
-        lignes.append(f"💬 WhatsApp : https://wa.me/{tel if len(tel) > 8 else '222' + tel}")
+        lignes.append(f"💬 WhatsApp : https://wa.me/{wa if len(wa) > 8 else '222' + wa}")
     return "\n".join(lignes)
 
 
@@ -954,6 +955,7 @@ def _client_depuis(data):
         "nom": _nettoyer_texte(c.get("nom"), 60),
         "tel": _normaliser_tel(c.get("tel")),
         "quartier": _nettoyer_texte(c.get("quartier"), 60),
+        "whatsapp": _normaliser_tel(c.get("whatsapp")),
     }
 
 
@@ -964,10 +966,12 @@ def _client_valide(c):
 def _champs_client(identifiant, client):
     """Colonnes Client / Telephone / Quartier écrites dans les Sheets."""
     if client and client.get("nom"):
-        return {"Client": client["nom"], "Telephone": client.get("tel", ""), "Quartier": client.get("quartier", "")}
+        tel = client.get("tel", "")
+        return {"Client": client["nom"], "Telephone": tel, "Quartier": client.get("quartier", ""),
+                "WhatsApp": client.get("whatsapp") or tel}   # numéro WhatsApp donné par le client, sinon son téléphone
     # Canal WhatsApp : l'identifiant est le numéro de téléphone du client
     tel = str(identifiant) if re.fullmatch(r"\d{8,15}", str(identifiant)) else ""
-    return {"Client": identifiant, "Telephone": tel, "Quartier": ""}
+    return {"Client": identifiant, "Telephone": tel, "Quartier": "", "WhatsApp": tel}
 
 
 def _recalculer_commande(commande, stock):
@@ -1686,7 +1690,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-22b"
+VERSION = "2026-10-22c"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
@@ -2066,8 +2070,8 @@ def api_dashboard():
         },
         "serie_7j": [{"jour": j, **par_jour[j]} for j in jours],
         "alertes_par_categorie": categories,
-        "dernieres_commandes": [court(c, ["Date", "Client", "Telephone", "Quartier", "Message", "Total MRU", "Livraison", "Ref", "Statut"]) for c in commandes[:6]],
-        "dernieres_alertes": [court(a, ["Date", "Client", "Telephone", "Quartier", "Categorie", "Message", "Ref", "Statut"]) for a in alertes[:6]],
+        "dernieres_commandes": [court(c, ["Date", "Client", "Telephone", "WhatsApp", "Quartier", "Message", "Total MRU", "Livraison", "Ref", "Statut"]) for c in commandes[:6]],
+        "dernieres_alertes": [court(a, ["Date", "Client", "Telephone", "WhatsApp", "Quartier", "Categorie", "Message", "Ref", "Statut"]) for a in alertes[:6]],
         "stock": stock,
         "stock_resume": stock_resume,
         "journal_ecritures": list(reversed(_journal_ecritures)),
