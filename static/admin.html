@@ -259,6 +259,12 @@
   function duree(sec){ return sec < 90 ? sec + " s" : (sec < 5400 ? Math.round(sec/60) + " min" : (sec < 172800 ? Math.round(sec/3600) + " h" : Math.round(sec/86400) + " j")); }
   // Ligne « 📍 quartier · 📞 téléphone » (le numéro est cliquable pour appeler). Texte inséré en textContent.
   function numero(ligne){ return String(ligne.Telephone || "").replace(/\D/g, ""); }
+  // Numéro WhatsApp : celui donné par le client, sinon son téléphone (indicatif +222 ajouté si absent)
+  function numeroWA(ligne){
+    let n = String(ligne.WhatsApp || ligne.Telephone || "").replace(/\D/g, "");
+    if (n.startsWith("00")) n = n.slice(2);
+    return n.length <= 8 ? "222" + n : n;
+  }
   function nouveauClient(ligne){ return !!ligne.Client && !String(ligne.Client).startsWith("web-"); }
   function coordonnees(ligne){
     const tel = numero(ligne);
@@ -277,7 +283,7 @@
     const tel = numero(ligne);
     if (tel) {
       const r = el("div",""); const a1 = el("a","", "📞 Appeler " + tel); a1.href = "tel:" + tel;
-      const wa = el("a","", "💬 WhatsApp"); wa.href = "https://wa.me/" + (tel.length === 8 ? "222" + tel : tel); wa.target = "_blank"; wa.rel = "noopener";
+      const wa = el("a","", "💬 WhatsApp"); wa.href = "https://api.whatsapp.com/send?phone=" + numeroWA(ligne); wa.target = "_blank"; wa.rel = "noopener";
       [a1, wa].forEach(x => { x.style.cssText = "color:var(--bleu);margin-right:14px;font-weight:600"; r.appendChild(x); });
       f.appendChild(r);
     } else f.appendChild(el("div","", "📞 Numéro non reçu (commande ancienne, ou colonne « Telephone » absente du Sheet)"));
