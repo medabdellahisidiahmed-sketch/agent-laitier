@@ -25,6 +25,7 @@ import threading
 import base64
 import struct
 import html as _html
+import secrets
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
@@ -410,7 +411,7 @@ def noter_modif_produit(nom, produit):
 _verrou_stock = threading.Lock()
 
 
-def decrementer_stock(retenues):
+def decrementer_stock(retenues, sens=-1):
     """Décompte du stock les produits d'une commande enregistrée.
     `retenues` = liste de (nom exact du produit, quantité). Effectué en arrière-plan :
     la mémoire (visible tout de suite par les clients) puis le Google Sheet Stock."""
@@ -426,7 +427,7 @@ def decrementer_stock(retenues):
                     p = par_nom.get(nom)
                     if not p or qte <= 0:
                         continue
-                    nouveau = max(0, int(p["stock_disponible"]) - int(qte))
+                    nouveau = max(0, int(p["stock_disponible"]) + sens * int(qte))
                     noter_modif_produit(nom, {**p, "stock_disponible": nouveau})
                     if not (STOCK_WEBHOOK_URL and SHEETS_CLE):
                         continue
@@ -442,6 +443,28 @@ def decrementer_stock(retenues):
         except Exception as e:
             print("[STOCK] ERREUR décompte :", e)
     _pool_ecriture.submit(tache)
+
+
+STATUTS_CMD = ["Nouvelle", "Confirmée", "Livrée", "Annulée"]
+STATUTS_ALT = ["À traiter", "Traitée"]
+_statuts = {}          # ref -> statut (mémoire, appliqué par-dessus ce que renvoient les feuilles)
+_lignes_refs = {}      # ref -> [[produit, quantité]] des commandes récentes (secours si la colonne Detail manque)
+_verrou_statuts = threading.Lock()
+_script_statuts = {}   # webhook -> (heure, True/False) : le script Google gère-t-il les statuts ?
+
+
+def _nouvelle_ref(prefixe):
+    return prefixe + datetime.now().strftime("%y%m%d%H%M%S") + secrets.token_hex(2)
+
+
+def _suivi_commande(retenues):
+    """Colonnes de suivi ajoutées à chaque commande : Ref, Statut, Detail (pour remettre le stock si annulée)."""
+    ref = _nouvelle_ref("C")
+    detail = [[n, int(q)] for n, q in retenues]
+    _lignes_refs[ref] = detail
+    for k in list(_lignes_refs)[:-300]:
+        _lignes_refs.pop(k, None)
+    return {"Ref": ref, "Statut": "Nouvelle", "Detail": json.dumps(detail, ensure_ascii=False, separators=(",", ":"))}
 
 
 def _appliquer_modifs_recentes(stock):
@@ -999,6 +1022,7 @@ def generer_reponse(identifiant_client, texte_client, client=None, historique=No
     if escalade:
         ajouter_ligne_arriere_plan(ALERTES_FILE, {
             **champs,
+            "Ref": _nouvelle_ref("A"), "Statut": "À traiter",
             "Categorie": categorie,
             "Message": texte_client,
             "Reponse": reponse_client,
@@ -1034,6 +1058,7 @@ def generer_reponse(identifiant_client, texte_client, client=None, historique=No
             detail += "\n⚠️ À vérifier : " + " ; ".join(remarques)
         ajouter_ligne_arriere_plan(COMMANDES_FILE, {
             **champs,
+            **_suivi_commande(retenues),
             "Message": texte_client + (" [À VÉRIFIER : " + " ; ".join(remarques) + "]" if remarques else ""),
             "Total MRU": total,
             "Livraison": commande.get("date_livraison_souhaitee", ""),
@@ -1477,6 +1502,7 @@ def commander():
     decrementer_stock(retenues)
     ajouter_ligne_arriere_plan(COMMANDES_FILE, {
         **champs,
+        **_suivi_commande(retenues),
         "Message": "Catalogue : " + " ; ".join(resume),
         "Total MRU": total,
         "Livraison": date_liv.strftime("%Y-%m-%d"),
@@ -1660,7 +1686,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-22a"
+VERSION = "2026-10-22b"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
@@ -1835,6 +1861,113 @@ def _jour(valeur):
     return str(valeur or "")[:10]
 
 
+def _appliquer_statuts(lignes, defaut):
+    """Copie des lignes avec leur statut à jour (mémoire du serveur > feuille > statut par défaut).
+    Les anciennes lignes sans Ref n'ont pas de statut (pas de boutons)."""
+    sortie = []
+    for l in lignes:
+        l = dict(l)
+        ref = str(l.get("Ref") or "").strip()
+        if ref:
+            l["Statut"] = _statuts.get(ref) or str(l.get("Statut") or "").strip() or defaut
+        else:
+            l["Statut"] = ""
+        sortie.append(l)
+    return sortie
+
+
+def _script_gere_statuts(webhook):
+    """Le script Google collé par l'utilisateur sait-il mettre un statut à jour ? (réponse gardée 5 min)"""
+    if not (webhook and SHEETS_CLE):
+        return False
+    vu = _script_statuts.get(webhook)
+    if vu and time.time() - vu[0] < (300 if vu[1] else 30):
+        return vu[1]
+    try:
+        r = requests.get(webhook, params={"action": "version", "cle": SHEETS_CLE}, timeout=15)
+        ok = r.json().get("statuts") is True
+    except Exception:
+        ok = False
+    _script_statuts[webhook] = (time.time(), ok)
+    return ok
+
+
+def _maj_statut_local(fichier, ref, statut):
+    """Met à jour le statut des lignes encore dans le fichier de secours local."""
+    if not os.path.exists(fichier):
+        return
+    with _verrou_secours:
+        with open(fichier, encoding="utf-8") as f:
+            lignes = [l for l in f.read().splitlines() if l.strip()]
+        sortie, change = [], False
+        for l in lignes:
+            try:
+                o = json.loads(l)
+            except ValueError:
+                sortie.append(l)
+                continue
+            if o.get("Ref") == ref:
+                o["Statut"], change = statut, True
+                l = json.dumps(o, ensure_ascii=False)
+            sortie.append(l)
+        if change:
+            with open(fichier, "w", encoding="utf-8") as f:
+                f.write("\n".join(sortie) + "\n")
+
+
+def _envoyer_statut(webhook, fichier, ref, statut, nom):
+    try:
+        _maj_statut_local(fichier, ref, statut)
+        if webhook and SHEETS_CLE:
+            r = requests.post(webhook, json={"_action": "statut", "_cle": SHEETS_CLE, "ref": ref, "statut": statut}, timeout=30)
+            ok, resume = _analyser_reponse_webhook(r)
+            noter_ecriture(nom, "OK" if ok else "ÉCHEC", f"statut {ref} → {statut}" + ("" if ok else " — " + resume))
+    except Exception as e:
+        print("[STATUT] ERREUR :", e)
+
+
+@app.route("/admin/api/statut", methods=["POST"])
+def api_statut():
+    """Change le statut d'une commande (Nouvelle / Confirmée / Livrée / Annulée) ou d'une alerte
+    (À traiter / Traitée). Annuler une commande remet son stock ; la rétablir le retire de nouveau."""
+    if not _admin_ok():
+        return jsonify({"ok": False, "message": "Accès refusé"}), 401
+    d = request.get_json(silent=True) or {}
+    type_, ref, statut = str(d.get("type", "")), str(d.get("ref", "")).strip(), str(d.get("statut", ""))
+    if type_ not in ("commande", "alerte") or not re.fullmatch(r"[A-Za-z0-9]{6,40}", ref) \
+            or statut not in (STATUTS_CMD if type_ == "commande" else STATUTS_ALT):
+        return jsonify({"ok": False, "message": "Demande invalide."}), 400
+    webhook, fichier, nom, defaut = ((COMMANDES_WEBHOOK_URL, COMMANDES_FILE, "Commandes", "Nouvelle") if type_ == "commande"
+                                     else (ALERTES_WEBHOOK_URL, ALERTES_FILE, "Alertes", "À traiter"))
+    entree = _cache_feuilles.get((webhook, fichier))
+    connues = (entree["v"].get("lignes", []) if entree else []) + lire_lignes_jsonl(fichier)
+    ligne = next((l for l in connues if str(l.get("Ref") or "").strip() == ref), None)
+
+    with _verrou_statuts:   # deux clics rapprochés ne remettent pas le stock deux fois
+        precedent = _statuts.get(ref) or str((ligne or {}).get("Statut") or "").strip() or defaut
+        if precedent == statut:
+            return jsonify({"ok": True, "message": "Déjà à ce statut."}), 200
+        _statuts[ref] = statut
+    notes = []
+    if type_ == "commande" and "Annulée" in (precedent, statut):
+        retenues = _lignes_refs.get(ref)
+        if retenues is None and ligne:
+            try:
+                retenues = json.loads(str(ligne.get("Detail") or "null"))
+            except ValueError:
+                retenues = None
+        if retenues:
+            decrementer_stock([(n, q) for n, q in retenues], +1 if statut == "Annulée" else -1)
+            notes.append("Stock remis." if statut == "Annulée" else "Stock retiré de nouveau.")
+        else:
+            notes.append("⚠️ Détail de la commande introuvable (colonne « Detail » absente ?) : corrigez le stock à la main.")
+    if webhook and not _script_gere_statuts(webhook):
+        notes.append("⚠️ Statut gardé en mémoire seulement : recollez le script Google (version « statuts ») dans la feuille " + nom + ".")
+    else:
+        _pool_ecriture.submit(_envoyer_statut, webhook, fichier, ref, statut, nom)
+    return jsonify({"ok": True, "message": " ".join(["Statut : " + statut + "."] + notes)}), 200
+
+
 def _colonnes_manquantes(resultat, attendues):
     """Colonnes que le Google Sheet ne contient pas (en-têtes absents de la ligne 1)."""
     if resultat.get("source") != "sheets" or resultat.get("erreur") or resultat.get("chargement") or not resultat.get("lignes"):
@@ -1862,8 +1995,9 @@ def api_dashboard():
     # Lignes qui n'ont pas pu partir vers Google (fichier de secours) : on les ajoute
     locales_cmd = lire_lignes_jsonl(COMMANDES_FILE) if COMMANDES_WEBHOOK_URL else []
     locales_alt = lire_lignes_jsonl(ALERTES_FILE) if ALERTES_WEBHOOK_URL else []
-    commandes = sorted(cmd["lignes"] + locales_cmd, key=lambda l: str(l.get("Date", "")), reverse=True)
-    alertes = sorted(alt["lignes"] + locales_alt, key=lambda l: str(l.get("Date", "")), reverse=True)
+    commandes = sorted(_appliquer_statuts(cmd["lignes"] + locales_cmd, "Nouvelle"), key=lambda l: str(l.get("Date", "")), reverse=True)
+    alertes = sorted(_appliquer_statuts(alt["lignes"] + locales_alt, "À traiter"), key=lambda l: str(l.get("Date", "")), reverse=True)
+    commandes_valides = [c for c in commandes if c.get("Statut") != "Annulée"]
 
     def stats(lignes, locales):
         dates = [str(l.get("Date", "")) for l in lignes if l.get("Date")]
@@ -1872,7 +2006,7 @@ def api_dashboard():
     aujourdhui = datetime.now().date()
     jours = [(aujourdhui - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
     par_jour = {j: {"nb": 0, "total": 0.0} for j in jours}
-    for c in commandes:
+    for c in commandes_valides:
         j = _jour(c.get("Date"))
         if j in par_jour:
             par_jour[j]["nb"] += 1
@@ -1880,12 +2014,14 @@ def api_dashboard():
 
     auj, hier = aujourdhui.isoformat(), (aujourdhui - timedelta(days=1)).isoformat()
     demain = (aujourdhui + timedelta(days=1)).isoformat()
-    livraison_auj = sum(1 for c in commandes if _jour(c.get("Livraison")) == auj)
-    livraison_dem = sum(1 for c in commandes if _jour(c.get("Livraison")) == demain)
+    livraison_auj = sum(1 for c in commandes_valides if _jour(c.get("Livraison")) == auj)
+    livraison_dem = sum(1 for c in commandes_valides if _jour(c.get("Livraison")) == demain)
 
     alertes_7j = [a for a in alertes if _jour(a.get("Date")) >= jours[0]]
     categories = {}
     for a in alertes_7j:
+        if a.get("Statut") == "Traitée":
+            continue
         k = a.get("Categorie") or "AUTRE"
         categories[k] = categories.get(k, 0) + 1
 
@@ -1926,11 +2062,12 @@ def api_dashboard():
             "livraison_aujourdhui": livraison_auj,
             "livraison_demain": livraison_dem,
             "alertes_7j": len(alertes_7j),
+            "cmd_nouvelles": sum(1 for c in commandes if c.get("Statut") == "Nouvelle"),
         },
         "serie_7j": [{"jour": j, **par_jour[j]} for j in jours],
         "alertes_par_categorie": categories,
-        "dernieres_commandes": [court(c, ["Date", "Client", "Telephone", "Quartier", "Message", "Total MRU", "Livraison"]) for c in commandes[:6]],
-        "dernieres_alertes": [court(a, ["Date", "Client", "Telephone", "Quartier", "Categorie", "Message"]) for a in alertes[:6]],
+        "dernieres_commandes": [court(c, ["Date", "Client", "Telephone", "Quartier", "Message", "Total MRU", "Livraison", "Ref", "Statut"]) for c in commandes[:6]],
+        "dernieres_alertes": [court(a, ["Date", "Client", "Telephone", "Quartier", "Categorie", "Message", "Ref", "Statut"]) for a in alertes[:6]],
         "stock": stock,
         "stock_resume": stock_resume,
         "journal_ecritures": list(reversed(_journal_ecritures)),
