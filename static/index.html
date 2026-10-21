@@ -230,6 +230,8 @@
     <input id="p-nom" type="text" autocomplete="organization" maxlength="60">
     <label for="p-tel"><span>📞 Téléphone</span><span class="ar" lang="ar">الهاتف</span></label>
     <input id="p-tel" type="tel" inputmode="tel" autocomplete="tel" maxlength="20" placeholder="Ex : 22 33 44 55">
+    <label for="p-wa"><span>💬 Numéro WhatsApp (si différent)</span><span class="ar" lang="ar">رقم واتساب (إن اختلف)</span></label>
+    <input id="p-wa" type="tel" inputmode="tel" autocomplete="off" maxlength="20" placeholder="Laissez vide si c'est le même numéro">
     <label for="p-quartier"><span>📍 Quartier</span><span class="ar" lang="ar">الحي</span></label>
     <input id="p-quartier" type="text" autocomplete="off" maxlength="60" placeholder="Ex : Tevragh Zeina">
     <div id="profil-erreur"></div>
@@ -267,7 +269,7 @@
   if (!profilValide(profil)) profil = null;
   // Identifiant stable : le numéro de téléphone (le même client reste le même d'une visite à l'autre)
   let idClient = profil ? "c-" + chiffres(profil.tel) : "web-" + Math.random().toString(36).slice(2, 10);
-  const donneesClient = () => profil ? { nom: profil.nom, tel: profil.tel, quartier: profil.quartier || "" } : null;
+  const donneesClient = () => profil ? { nom: profil.nom, tel: profil.tel, quartier: profil.quartier || "", whatsapp: profil.whatsapp || "" } : null;
 
   const zoneProfil = document.getElementById("profil");
   function majBoutonCompte() {
@@ -277,6 +279,7 @@
     document.getElementById("p-nom").value = profil ? profil.nom : "";
     document.getElementById("p-tel").value = profil ? profil.tel : "";
     document.getElementById("p-quartier").value = profil ? (profil.quartier || "") : "";
+    document.getElementById("p-wa").value = profil ? (profil.whatsapp || "") : "";
     document.getElementById("profil-erreur").textContent = "";
     document.getElementById("profil-annuler").style.display = (modifier && profil) ? "block" : "none";
     zoneProfil.style.display = "flex";
@@ -288,10 +291,12 @@
     const nouveau = {
       nom: document.getElementById("p-nom").value.trim(),
       tel: document.getElementById("p-tel").value.trim(),
-      quartier: document.getElementById("p-quartier").value.trim()
+      quartier: document.getElementById("p-quartier").value.trim(),
+      whatsapp: document.getElementById("p-wa").value.trim()
     };
     if (nouveau.nom.length < 2) { document.getElementById("profil-erreur").textContent = "Écrivez le nom de votre boutique."; return; }
     if (chiffres(nouveau.tel).length < 8) { document.getElementById("profil-erreur").textContent = "Écrivez votre numéro de téléphone (8 chiffres)."; return; }
+    if (nouveau.whatsapp && chiffres(nouveau.whatsapp).length < 8) { document.getElementById("profil-erreur").textContent = "Numéro WhatsApp : 8 chiffres, ou laissez vide."; return; }
     profil = nouveau;
     idClient = "c-" + chiffres(profil.tel);
     try { localStorage.setItem("profil", JSON.stringify(profil)); } catch (e) {}
