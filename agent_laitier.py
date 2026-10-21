@@ -339,13 +339,13 @@ def _texte_alerte(type_, client_champs, details, total=None):
               f"👤 {client_champs.get('Client', '')}"]
     if client_champs.get("Quartier"):
         lignes.append(f"📍 {client_champs['Quartier']}")
-    if tel:
-        lignes.append(f"📞 {tel}")
+    if wa:   # le lien WhatsApp d'abord ; le numéro seul n'est pas répété (Android en ferait un lien « téléphone »)
+        lignes.append(f"💬 WhatsApp : https://wa.me/{wa if len(wa) > 8 else '222' + wa}")
+    if tel and tel != wa:
+        lignes.append(f"📞 Tél : {tel}")
     lignes.append(details)
     if total not in (None, ""):
         lignes.append(f"💰 {total} MRU")
-    if tel:
-        lignes.append(f"💬 WhatsApp : https://wa.me/{wa if len(wa) > 8 else '222' + wa}")
     return "\n".join(lignes)
 
 
@@ -1690,7 +1690,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-22c"
+VERSION = "2026-10-22d"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
