@@ -80,6 +80,10 @@
   .niveau { height:8px; background:#E8EDF5; border-radius:999px; margin-top:6px; overflow:hidden; }
   .niveau i { display:block; height:100%; border-radius:999px; background:var(--vert); }
   .niveau i.bas { background:#D98A00; } .niveau i.rupture { background:var(--rouge); }
+  .btns { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .btns button { border:1px solid var(--bleu); background:none; color:var(--bleu); border-radius:10px; padding:8px 12px; font-size:13px; font-weight:600; cursor:pointer; }
+  .btns button.danger { border-color:var(--rouge); color:var(--rouge); }
+  .btns button:disabled { opacity:.5; }
   .badge.vert { background:#E3F4EA; color:var(--vert); }
   .resume-stock { font-size:13px; color:var(--gris); margin:-4px 0 8px; }
   :root { --vert-txt:#176B3A; }
@@ -242,7 +246,7 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
-  const CAT = { COMMANDE:["Commande",""], QUESTION_STOCK_PRIX:["Question",""], RECLAMATION:["Réclamation","rouge"], CREDIT_PAIEMENT:["Crédit / paiement","orange"], AUTRE:["Autre",""] };
+  const CAT = { COMMANDE:["Commande",""], QUESTION_STOCK_PRIX:["Question",""], RECLAMATION:["Réclamation","rouge"], CREDIT_PAIEMENT:["Crédit / paiement","orange"], AUTRE:["Autre",""], JOURNAL_PHOTO:["Journal admin",""] };
   const nf = new Intl.NumberFormat("fr-FR");
   let jeton = "";
   let minuteur = null;
@@ -284,7 +288,39 @@
   function rendreCliquable(l, ligne, avecLivraison){
     const f = fiche(ligne, avecLivraison); f.hidden = true; l.appendChild(f);
     l.style.cursor = "pointer";
-    l.onclick = (e) => { if (e.target.closest("a")) return; f.hidden = !f.hidden; };
+    l.onclick = (e) => { if (e.target.closest("a, button")) return; f.hidden = !f.hidden; };
+  }
+  // Statut + boutons d'action (uniquement pour les lignes qui ont une « Ref », donc créées avec cette version)
+  const SUITE = {
+    commande: { "Nouvelle":[["Confirmer","Confirmée"],["Annuler","Annulée"]], "Confirmée":[["Marquer livrée","Livrée"],["Annuler","Annulée"]],
+                "Livrée":[], "Annulée":[["Rétablir","Nouvelle"]] },
+    alerte:   { "À traiter":[["✓ Traitée","Traitée"]], "Traitée":[["Rouvrir","À traiter"]] }
+  };
+  const COULEUR_STATUT = { "Nouvelle":"orange", "Confirmée":"", "Livrée":"vert", "Annulée":"rouge", "À traiter":"orange", "Traitée":"vert" };
+  function zoneStatut(l, type, ligne){
+    if (!ligne.Ref || !ligne.Statut) return;
+    const haut = el("div","bas"); haut.appendChild(el("span","badge " + (COULEUR_STATUT[ligne.Statut]||""), ligne.Statut)); l.appendChild(haut);
+    const actions = (SUITE[type][ligne.Statut] || []);
+    if (!actions.length) return;
+    const b = el("div","btns");
+    actions.forEach(([texte, nouveau]) => {
+      const x = el("button", nouveau === "Annulée" ? "danger" : "", texte); x.type = "button";
+      x.onclick = async (e) => {
+        e.stopPropagation();
+        if (nouveau === "Annulée" && !confirm("Annuler cette commande ? Le stock sera remis.")) return;
+        b.querySelectorAll("button").forEach(y => y.disabled = true);
+        try {
+          const r = await fetch("/admin/api/statut", { method:"POST", headers:{ "X-Admin-Token": jeton, "Content-Type":"application/json" },
+                                                       body: JSON.stringify({ type: type, ref: ligne.Ref, statut: nouveau }) });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || !j.ok) { bandeau(j.message || "Le statut n'a pas pu être changé."); }
+          else if (/⚠️/.test(j.message || "")) { bandeau(j.message); }
+          charger(true, true);
+        } catch (err) { bandeau("Connexion impossible."); }
+      };
+      b.appendChild(x);
+    });
+    l.appendChild(b);
   }
   function heure(iso){ return (iso||"").replace("T"," ").slice(5,16); }
 
@@ -444,6 +480,7 @@
     const rec = d.alertes_par_categorie.RECLAMATION || 0, cre = d.alertes_par_categorie.CREDIT_PAIEMENT || 0;
     if (rec > 0) ligneTodo("💬", rec + " réclamation(s) à traiter", "7 derniers jours", "alertes");
     if (cre > 0) ligneTodo("💳", cre + " demande(s) de crédit / paiement", "7 derniers jours", "alertes");
+    if (!errC && k.cmd_nouvelles > 0) ligneTodo("🆕", k.cmd_nouvelles + " commande(s) à confirmer", "", "commandes");
     if (!errC && k.livraison_aujourdhui > 0) ligneTodo("🚚", k.livraison_aujourdhui + " livraison(s) prévue(s) aujourd'hui", "", "commandes");
     if (!lt.children.length) { const o = el("div","todo ok"); o.appendChild(el("span","pic","✅")); o.appendChild(el("span","txt","Rien d'urgent pour le moment.")); lt.appendChild(o); }
 
@@ -457,6 +494,7 @@
       const co = coordonnees(c); if (co) l.appendChild(co);
       l.appendChild(el("div","bas", heure(c.Date) + (c.Livraison ? " · livraison " + String(c.Livraison).slice(0,10) : "")));
       if (c.Message) l.appendChild(el("div","bas", c.Message));
+      zoneStatut(l, "commande", c);
       rendreCliquable(l, c, true);
       lc.appendChild(l);
     });
@@ -471,6 +509,7 @@
       const co2 = coordonnees(a); if (co2) l.appendChild(co2);
       l.appendChild(el("div","bas", heure(a.Date)));
       if (a.Message) l.appendChild(el("div","bas", a.Message));
+      zoneStatut(l, "alerte", a);
       rendreCliquable(l, a, false);
       la.appendChild(l);
     });
