@@ -68,6 +68,7 @@ ALERTES_WEBHOOK_URL = os.environ.get("ALERTES_WEBHOOK_URL")
 # (tableau de bord). Doit être identique à CLE_SECRETE dans les scripts.
 SHEETS_CLE = os.environ.get("SHEETS_CLE", "")
 SEUIL_STOCK_BAS = 20
+STOCK_AUTO = os.environ.get("STOCK_AUTO", "1") != "0"   # 0 = ne pas décompter le stock automatiquement
 
 # Alerte instantanée sur le téléphone du responsable (Telegram : officiel, gratuit).
 # TELEGRAM_CHAT_ID peut contenir plusieurs identifiants séparés par une virgule.
@@ -404,6 +405,43 @@ _modifs_recentes = {}  # nom en minuscules -> (heure, produit dict ou None si su
 
 def noter_modif_produit(nom, produit):
     _modifs_recentes[nom.strip().lower()] = (time.time(), produit)
+
+
+_verrou_stock = threading.Lock()
+
+
+def decrementer_stock(retenues):
+    """Décompte du stock les produits d'une commande enregistrée.
+    `retenues` = liste de (nom exact du produit, quantité). Effectué en arrière-plan :
+    la mémoire (visible tout de suite par les clients) puis le Google Sheet Stock."""
+    if not STOCK_AUTO or not retenues:
+        return
+
+    def tache():
+        try:
+            with _verrou_stock:
+                vider_cache_stock()
+                par_nom = {p["produit"]: p for p in lire_stock()}
+                for nom, qte in retenues:
+                    p = par_nom.get(nom)
+                    if not p or qte <= 0:
+                        continue
+                    nouveau = max(0, int(p["stock_disponible"]) - int(qte))
+                    noter_modif_produit(nom, {**p, "stock_disponible": nouveau})
+                    if not (STOCK_WEBHOOK_URL and SHEETS_CLE):
+                        continue
+                    try:
+                        r = requests.post(STOCK_WEBHOOK_URL, json=_avec_cle(
+                            {"action": "upsert", "Produit": nom, "Stock disponible": nouveau}), timeout=25)
+                        ok, resume = _analyser_reponse_webhook(r)
+                    except Exception as e:
+                        ok, resume = False, str(e)
+                    print(f"[STOCK] décompte {nom} : {p['stock_disponible']} -> {nouveau} : {'OK' if ok else 'ÉCHEC ' + resume}")
+                    noter_ecriture("Stock", "OK" if ok else "ÉCHEC", f"{nom} : {p['stock_disponible']} → {nouveau}" + ("" if ok else " — " + resume))
+                vider_cache_stock()
+        except Exception as e:
+            print("[STOCK] ERREUR décompte :", e)
+    _pool_ecriture.submit(tache)
 
 
 def _appliquer_modifs_recentes(stock):
@@ -914,7 +952,7 @@ def _recalculer_commande(commande, stock):
     (l'IA peut se tromper en calculant ou inventer un prix). Renvoie
     (total, résumé, remarques) ; les produits inconnus ne sont pas comptés."""
     par_nom = {_normaliser_cle(p["produit"]): p for p in stock}
-    total, resume, remarques = 0, [], []
+    total, resume, remarques, retenues = 0, [], [], []
     lignes = commande.get("produits") if isinstance(commande, dict) else None
     for l in (lignes if isinstance(lignes, list) else []):
         if not isinstance(l, dict):
@@ -937,7 +975,8 @@ def _recalculer_commande(commande, stock):
             remarques.append(f"{qte} {produit['produit']} demandés, stock {produit['stock_disponible']}")
         total += qte * produit["prix_unitaire_mru"]
         resume.append(f"{qte} x {produit['produit']}")
-    return total, resume, remarques
+        retenues.append((produit["produit"], min(qte, produit["stock_disponible"])))
+    return total, resume, remarques, retenues
 
 
 def generer_reponse(identifiant_client, texte_client, client=None, historique=None):
@@ -969,7 +1008,7 @@ def generer_reponse(identifiant_client, texte_client, client=None, historique=No
         print("[IA] commande en cours (pas encore finale) : rien n'est enregistré.")
     elif commande:
         total_ia = commande.get("total_commande_mru", "")
-        total, resume, remarques = _recalculer_commande(commande, stock)
+        total, resume, remarques, retenues = _recalculer_commande(commande, stock)
         try:
             ecart = int(float(total_ia)) != total
         except (TypeError, ValueError):
@@ -987,6 +1026,7 @@ def generer_reponse(identifiant_client, texte_client, client=None, historique=No
             return resultat
         if resume:
             _commandes_chat_vues[empreinte] = maintenant
+            decrementer_stock(retenues)
         detail = "📝 " + texte_client[:500]
         if resume:
             detail += "\n🧾 " + " · ".join(resume)
@@ -1406,7 +1446,7 @@ def commander():
         _doublons[empreinte] = maintenant
 
     stock = {p["produit"]: p for p in lire_stock()}
-    total, resume = 0, []
+    total, resume, retenues = 0, [], []
     for l in lignes:
         if not isinstance(l, dict):
             continue
@@ -1426,6 +1466,7 @@ def commander():
                 f"Désolé, il reste seulement {produit['stock_disponible']} {produit['produit']}."}), 200
         total += qte * produit["prix_unitaire_mru"]
         resume.append(f"{qte} x {produit['produit']}")
+        retenues.append((produit["produit"], qte))
 
     if not resume:
         _doublons.pop(empreinte, None)
@@ -1433,6 +1474,7 @@ def commander():
 
     date_liv = datetime.now() + timedelta(days=0 if jour == "aujourdhui" else 1)
     champs = _champs_client(id_client, client)
+    decrementer_stock(retenues)
     ajouter_ligne_arriere_plan(COMMANDES_FILE, {
         **champs,
         "Message": "Catalogue : " + " ; ".join(resume),
@@ -1618,7 +1660,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-21d"
+VERSION = "2026-10-22a"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
