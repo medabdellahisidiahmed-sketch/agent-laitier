@@ -272,7 +272,7 @@
     if (!tel && !quartier && !nouveauClient(ligne)) return null;
     const d = el("div","bas");
     if (quartier) d.appendChild(document.createTextNode("📍 " + quartier + " · "));
-    if (tel) { const a = el("a","", "📞 " + tel); a.href = "tel:" + tel; a.style.color = "var(--bleu)"; d.appendChild(a); }
+    if (tel) { const a = el("a","", "💬 " + tel); a.href = "https://api.whatsapp.com/send?phone=" + numeroWA(ligne); a.target = "_blank"; a.rel = "noopener"; a.style.color = "var(--bleu)"; d.appendChild(a); }
     else d.appendChild(document.createTextNode("📞 numéro non reçu"));
     return d;
   }
@@ -284,7 +284,7 @@
     if (tel) {
       const r = el("div",""); const a1 = el("a","", "📞 Appeler " + tel); a1.href = "tel:" + tel;
       const wa = el("a","", "💬 WhatsApp"); wa.href = "https://api.whatsapp.com/send?phone=" + numeroWA(ligne); wa.target = "_blank"; wa.rel = "noopener";
-      [a1, wa].forEach(x => { x.style.cssText = "color:var(--bleu);margin-right:14px;font-weight:600"; r.appendChild(x); });
+      [wa, a1].forEach(x => { x.style.cssText = "color:var(--bleu);margin-right:14px;font-weight:600"; r.appendChild(x); });
       f.appendChild(r);
     } else f.appendChild(el("div","", "📞 Numéro non reçu (commande ancienne, ou colonne « Telephone » absente du Sheet)"));
     f.appendChild(el("div","", "📍 " + (String(ligne.Quartier || "").trim() || "Quartier non reçu")));
