@@ -192,12 +192,14 @@
     <button id="t-chat">💬 Discuter</button>
   </div>
 
+  <div id="filtres" style="display:none;padding:8px 12px 0;background:#F4F6FA"></div>
   <div id="catalogue"></div>
   <div id="barre-commande">
     <div class="jours">
       <button data-j="aujourdhui">Aujourd'hui</button>
       <button data-j="demain" class="actif">Demain</button>
     </div>
+    <button id="refaire" type="button" style="display:none;width:100%;margin-bottom:8px;padding:12px;border:1.5px solid #1B4D8C;border-radius:12px;background:#fff;color:#1B4D8C;font-size:15px;font-weight:600">🔁 Refaire ma dernière commande</button>
     <button id="valider">✅ Commander — <span id="total">0</span> MRU</button>
   </div>
 
@@ -374,16 +376,72 @@
     produits.forEach(p => t += (quantites[p.produit] || 0) * p.prix_unitaire_mru);
     document.getElementById("total").textContent = t;
     document.getElementById("valider").disabled = t === 0;
+    majBoutonRefaire();
+  }
+
+  // --- « Refaire ma dernière commande » : mémorisée sur le téléphone du client ---
+  function derniereCommande() {
+    try { const d = JSON.parse(localStorage.getItem("derniere_commande") || "null"); return d && typeof d === "object" ? d : null; } catch (e) { return null; }
+  }
+  function majBoutonRefaire() {
+    const b = document.getElementById("refaire"), d = derniereCommande();
+    const vide = !produits.some(p => quantites[p.produit] > 0);
+    b.style.display = (d && Object.keys(d).length && vide && produits.length) ? "block" : "none";
+  }
+  document.getElementById("refaire").onclick = () => {
+    const d = derniereCommande() || {}; let manque = 0;
+    quantites = {};
+    Object.keys(d).forEach(nom => {
+      const p = produits.find(x => x.produit === nom);
+      const n = Math.min(parseInt(d[nom], 10) || 0, p ? p.stock_disponible : 0);
+      if (p && n > 0) quantites[nom] = n; else manque++;
+    });
+    dessinerCatalogue();
+    if (manque) alert(manque + " produit(s) de votre dernière commande ne sont plus disponibles (ou en quantité réduite).");
+  };
+
+  // --- Recherche et catégories ---
+  let recherche = "", filtreCat = "";
+  const simple = (t) => (t || "").toString().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+  function dessinerFiltres() {
+    const z = document.getElementById("filtres");
+    const cats = [...new Set(produits.map(p => (p.categorie || "").trim()).filter(Boolean))];
+    if (produits.length < 8 && !cats.length) { z.style.display = "none"; return; }   // petit catalogue : pas de filtres
+    z.style.display = "block"; z.innerHTML = "";
+    const champ = document.createElement("input");
+    champ.type = "search"; champ.value = recherche; champ.placeholder = "🔍 Chercher un produit…"; champ.setAttribute("aria-label", "Chercher un produit");
+    champ.style.cssText = "width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid #D7DCE5;border-radius:12px;font-size:16px";
+    champ.oninput = () => { recherche = champ.value; const pos = champ.selectionStart; dessinerCatalogue(); };
+    z.appendChild(champ);
+    if (cats.length) {
+      const ligne = document.createElement("div"); ligne.style.cssText = "display:flex;gap:8px;overflow-x:auto;padding:8px 0 4px";
+      [["", "Tout"]].concat(cats.map(c => [c, c])).forEach(([val, txt]) => {
+        const b = document.createElement("button"); b.type = "button"; b.textContent = txt;
+        const actif = filtreCat === val;
+        b.style.cssText = "flex:none;padding:8px 14px;border-radius:999px;font-size:14px;font-weight:600;border:1.5px solid #1B4D8C;" +
+          (actif ? "background:#1B4D8C;color:#fff" : "background:#fff;color:#1B4D8C");
+        b.onclick = () => { filtreCat = val; dessinerFiltres(); dessinerCatalogue(); };
+        ligne.appendChild(b);
+      });
+      z.appendChild(ligne);
+    }
   }
 
   function dessinerCatalogue() {
     zoneCat.innerHTML = "";
-    produits.forEach(p => {
+    const q = simple(recherche);
+    const visibles = produits.filter(p => (!filtreCat || (p.categorie || "").trim() === filtreCat) &&
+      (!q || simple(p.produit).includes(q) || simple(p.code).includes(q)));
+    if (!visibles.length && produits.length) {
+      const v = document.createElement("div"); v.style.cssText = "text-align:center;color:#8A93A3;padding:24px";
+      v.textContent = "Aucun produit trouvé."; zoneCat.appendChild(v);
+    }
+    visibles.forEach(p => {
       const ligne = document.createElement("div");
       ligne.className = "produit";
       ligne.innerHTML = `<div class="photo">🥛</div><div class="info"><b></b><span></span></div>
         <div class="compteur"><button class="moins">−</button><div class="qte">${quantites[p.produit] || 0}</div><button class="plus">+</button></div>`;
-      if (/^(data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+\/=]+|https:\/\/[^\s"'<>]+|\/static\/[^\s"'<>]+)$/.test(p.photo || "")) {
+      if (/^(data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+\/=]+|https:\/\/[^\s"'<>]+|\/static\/[^\s"'<>]+|\/photo\?[^\s"'<>]+)$/.test(p.photo || "")) {
         const im = document.createElement("img"); im.className = "photo"; im.alt = ""; im.src = p.photo;
         ligne.querySelector(".photo").replaceWith(im);
       }
@@ -431,26 +489,74 @@
     document.getElementById("recap").style.display = "none";
   };
 
+  // --- Commande « boîte d'envoi » : jamais perdue ---
+  // La commande reçoit une référence unique et reste sur le téléphone tant que le serveur n'a pas confirmé
+  // qu'elle est enregistrée dans Google. Elle est renvoyée toute seule (la référence évite tout doublon).
+  const nouvelleRef = () => {
+    try { return "K" + crypto.randomUUID().replace(/-/g, "").slice(0, 20); } catch (e) {}
+    return "K" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  };
+  const lireAttente = () => { try { return JSON.parse(localStorage.getItem("commande_attente") || "null"); } catch (e) { return null; } };
+  const ecrireAttente = (c) => { try { c ? localStorage.setItem("commande_attente", JSON.stringify(c)) : localStorage.removeItem("commande_attente"); } catch (e) {} };
+
+  function afficherBandeauAttente() {
+    let b = document.getElementById("attente");
+    if (!b) {
+      b = document.createElement("div"); b.id = "attente";
+      b.style.cssText = "background:#FFF1DB;color:#8A5A00;padding:10px 12px;font-size:14px;font-weight:600;text-align:center";
+      zoneCat.parentNode.insertBefore(b, zoneCat);
+    }
+    const c = lireAttente();
+    b.style.display = c ? "block" : "none";
+    if (c) b.textContent = "⏳ Votre commande attend d'être envoyée. Elle part toute seule dès que la connexion revient. Ne la refaites pas.";
+  }
+
+  function montrerConfirmation(d, lignes) {
+    const ul = document.getElementById("conf-lignes");
+    ul.innerHTML = "";
+    d.resume.forEach(t => { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); });
+    document.getElementById("conf-total").textContent = d.total;
+    document.getElementById("conf-liv").textContent = d.livraison;
+    document.getElementById("confirmation").style.display = "flex";
+    try { const m = {}; lignes.forEach(l => { m[l.produit] = l.quantite; }); localStorage.setItem("derniere_commande", JSON.stringify(m)); } catch (e) {}
+    quantites = {}; dessinerCatalogue();
+  }
+
+  let envoiEnCours = false;
+  // Envoie la commande en attente. Renvoie "ok", "attente" (réessayer plus tard) ou "refus" (définitif).
+  async function envoyerAttente(manuel) {
+    const c = lireAttente();
+    if (!c || envoiEnCours) return c ? "attente" : "ok";
+    envoiEnCours = true;
+    try {
+      const r = await fetch("/commander", { method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ ref: c.ref, id_client: c.id_client, lignes: c.lignes, livraison: c.livraison, client: c.client }) });
+      const d = await r.json();
+      if (d.ok) { ecrireAttente(null); afficherBandeauAttente(); montrerConfirmation(d, c.lignes); return "ok"; }
+      if (d.differe) { return "attente"; }
+      ecrireAttente(null); afficherBandeauAttente();      // refus définitif (stock, profil...) : on ne boucle pas
+      alert(d.message); if (d.profil_requis) afficherProfil(false); majTotal();
+      return "refus";
+    } catch (e) { return "attente"; }
+    finally { envoiEnCours = false; }
+  }
+  setInterval(() => { if (lireAttente()) envoyerAttente(false); }, 30000);
+  window.addEventListener("online", () => { if (lireAttente()) envoyerAttente(false); });
+
   document.getElementById("recap-oui").onclick = async () => {
     const bouton = document.getElementById("recap-oui");
+    if (lireAttente()) { alert("Une commande précédente attend encore d'être envoyée. Patientez un instant."); return; }
     bouton.disabled = true;
     document.getElementById("recap").style.display = "none";
     const lignes = produits.filter(p => quantites[p.produit] > 0)
       .map(p => ({ produit: p.produit, quantite: quantites[p.produit] }));
-    try {
-      const r = await fetch("/commander", { method: "POST", headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ id_client: idClient, lignes, livraison: jourLivraison, client: donneesClient() }) });
-      const d = await r.json();
-      if (d.ok) {
-        const ul = document.getElementById("conf-lignes");
-        ul.innerHTML = "";
-        d.resume.forEach(t => { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); });
-        document.getElementById("conf-total").textContent = d.total;
-        document.getElementById("conf-liv").textContent = d.livraison;
-        document.getElementById("confirmation").style.display = "flex";
-        quantites = {}; dessinerCatalogue();
-      } else { alert(d.message); if (d.profil_requis) afficherProfil(false); majTotal(); }
-    } catch (e) { alert("Connexion impossible. Réessayez."); majTotal(); }
+    ecrireAttente({ ref: nouvelleRef(), id_client: idClient, lignes: lignes, livraison: jourLivraison, client: donneesClient(), t: Date.now() });
+    const etat = await envoyerAttente(true);
+    if (etat === "attente") {
+      afficherBandeauAttente();
+      quantites = {}; dessinerCatalogue();
+      alert("Votre commande est gardée sur votre téléphone. Elle sera envoyée automatiquement dès que possible. Ne la refaites pas.");
+    }
     bouton.disabled = false;
   };
 
@@ -461,16 +567,17 @@
   // Catalogue : affichage immédiat depuis la dernière visite, puis mise à jour
   let cat0 = null;
   try { cat0 = JSON.parse(localStorage.getItem("catalogue_cache") || "null"); } catch (e) {}
-  if (Array.isArray(cat0) && cat0.length) { produits = cat0; dessinerCatalogue(); }
+  if (Array.isArray(cat0) && cat0.length) { produits = cat0; dessinerFiltres(); dessinerCatalogue(); }
   else {
     zoneCat.textContent = "⏳ Chargement du catalogue…";
     setTimeout(() => { if (!produits.length) zoneCat.textContent = "⏳ Le serveur se réveille, patientez jusqu'à 1 minute…"; }, 5000);
   }
   fetch("/catalogue").then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }).then(d => {
-    produits = d; dessinerCatalogue();
+    produits = d; dessinerFiltres(); dessinerCatalogue();
     try { localStorage.setItem("catalogue_cache", JSON.stringify(d)); } catch (e) {}
   }).catch(() => { if (!produits.length) zoneCat.textContent = "Catalogue indisponible. Utilisez l'onglet Discuter."; });
   afficherOnglet(true);
+  afficherBandeauAttente(); if (lireAttente()) envoyerAttente(false);
 
   // --- Installation PWA (icône sur l'écran d'accueil) ---
   let evenementInstall = null;
