@@ -26,6 +26,8 @@ import base64
 import struct
 import html as _html
 import secrets
+import hashlib
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
@@ -63,8 +65,13 @@ ALERTES_FILE = "alertes.jsonl"       # secours local si le webhook Sheets n'est 
 # dans Google Sheets, de façon permanente (ne sont plus perdues au
 # redémarrage du serveur gratuit).
 COMMANDES_WEBHOOK_URL = os.environ.get("COMMANDES_WEBHOOK_URL")
+# Copies de sécurité (facultatif) : un SECOND Google Sheet (idéalement un autre compte Google) qui reçoit
+# chaque ligne en même temps. Si le premier est en panne, la commande est quand même enregistrée.
+COMMANDES_WEBHOOK_URL_2 = os.environ.get("COMMANDES_WEBHOOK_URL_2")
+ALERTES_WEBHOOK_URL_2 = os.environ.get("ALERTES_WEBHOOK_URL_2")
 STOCK_WEBHOOK_URL = os.environ.get("STOCK_WEBHOOK_URL")  # Apps Script du Google Sheet STOCK (gestion produits/photos/prix)
 ALERTES_WEBHOOK_URL = os.environ.get("ALERTES_WEBHOOK_URL")
+MIROIRS = {u: [m] for u, m in ((COMMANDES_WEBHOOK_URL, COMMANDES_WEBHOOK_URL_2), (ALERTES_WEBHOOK_URL, ALERTES_WEBHOOK_URL_2)) if u and m}
 # Clé secrète partagée avec les scripts Apps Script pour LIRE les Sheets Commandes/Alertes
 # (tableau de bord). Doit être identique à CLE_SECRETE dans les scripts.
 SHEETS_CLE = os.environ.get("SHEETS_CLE", "")
@@ -458,14 +465,52 @@ def _nouvelle_ref(prefixe):
     return prefixe + datetime.now().strftime("%y%m%d%H%M%S") + secrets.token_hex(2)
 
 
-def _suivi_commande(retenues):
+def _suivi_commande(retenues, ref=None):
     """Colonnes de suivi ajoutées à chaque commande : Ref, Statut, Detail (pour remettre le stock si annulée)."""
-    ref = _nouvelle_ref("C")
+    ref = ref or _nouvelle_ref("C")
     detail = [[n, int(q)] for n, q in retenues]
     _lignes_refs[ref] = detail
     for k in list(_lignes_refs)[:-300]:
         _lignes_refs.pop(k, None)
     return {"Ref": ref, "Statut": "Nouvelle", "Detail": json.dumps(detail, ensure_ascii=False, separators=(",", ":"))}
+
+
+_decomptes = set()      # refs dont le stock a déjà été décompté (un renvoi ne décompte pas deux fois)
+
+
+def decompter_une_fois(ref, retenues):
+    if ref in _decomptes:
+        return
+    _decomptes.add(ref)
+    if len(_decomptes) > 2000:
+        _decomptes.clear()
+        _decomptes.add(ref)
+    decrementer_stock(retenues)
+
+
+_commandes_ok = {}      # ref -> réponse déjà donnée au client (un renvoi de la même commande reçoit la même réponse)
+_alertes_faites = set()
+
+
+def _alerter_une_fois(cle, texte):
+    """Prévient le responsable (notification + e-mail + alarme) une seule fois par clé."""
+    if cle in _alertes_faites:
+        return
+    _alertes_faites.add(cle)
+    if len(_alertes_faites) > 2000:
+        _alertes_faites.clear()
+    evt_id = noter_evenement(texte)
+    _pool_ecriture.submit(notifier_responsable, texte, evt_id)
+
+
+def enregistrer_commande_durable(ref, ligne, texte_alerte, texte_echec):
+    """1) prévient tout de suite le responsable (la commande est déjà dans son téléphone/e-mail) ;
+    2) écrit dans Google (+ copie) et ATTEND la confirmation. Renvoie "ok", "deja", "local" ou "" (échec)."""
+    _alerter_une_fois(ref, texte_alerte)
+    etat = ajouter_ligne(COMMANDES_FILE, ligne, COMMANDES_WEBHOOK_URL, timeout=20)
+    if not etat:
+        _alerter_une_fois(ref + "!", texte_echec)
+    return etat
 
 
 def _appliquer_modifs_recentes(stock):
@@ -517,6 +562,7 @@ def _lire_stock_via_script():
                 "unite": str(valeurs.get("unite", "")).strip(),
                 "photo": _photo_sure(valeurs.get("photo", "")),
                 "code": str(valeurs.get("code", "")).strip(),
+                "categorie": str(valeurs.get("categorie", "")).strip()[:40],
             })
         return stock
     except Exception:
@@ -570,6 +616,7 @@ def _lire_stock_brut():
                     "unite": valeurs.get("unite", "").strip(),
                     "photo": _photo_sure(valeurs.get("photo", "")),
                     "code": valeurs.get("code", "").strip(),
+                    "categorie": valeurs.get("categorie", "").strip()[:40],
                 })
             if stock:
                 return stock
@@ -598,30 +645,33 @@ _verrou_secours = threading.Lock()
 
 
 def _rejouer_secours(fichier, webhook_url):
-    """Quand Google fonctionne de nouveau, renvoie les lignes mises de côté dans
-    le fichier de secours, puis les retire du fichier."""
+    """Renvoie vers Google les lignes restées dans un fichier d'attente, puis les retire.
+    Le réseau est utilisé SANS tenir le verrou (une panne de Google ne bloque pas les commandes)."""
     if not webhook_url or not os.path.exists(fichier):
         return
     with _verrou_secours:
         with open(fichier, encoding="utf-8") as f:
             lignes = [l for l in f.read().splitlines() if l.strip()]
-        if not lignes:
-            return
-        restantes = []
-        for l in lignes:
-            try:
-                r = requests.post(webhook_url, json=_avec_cle(json.loads(l)), timeout=45)
-                ok, _ = _analyser_reponse_webhook(r)
-            except Exception:
-                ok = False
-            if not ok:
-                restantes.append(l)
+    if not lignes:
+        return
+    envoyees = set()
+    for l in lignes:
+        try:
+            etat, _ = _poster_ligne(webhook_url, json.loads(l), 25)
+        except ValueError:
+            etat = "ok"   # ligne illisible : on ne la garde pas indéfiniment
+        if etat == "echec":
+            break         # Google ne répond pas : inutile d'insister, on réessaiera dans une minute
+        envoyees.add(l)
+    if not envoyees:
+        return
+    with _verrou_secours:   # relit le fichier : d'autres lignes ont pu y être ajoutées entre-temps
+        with open(fichier, encoding="utf-8") as f:
+            actuelles = [l for l in f.read().splitlines() if l.strip()]
         with open(fichier, "w", encoding="utf-8") as f:
-            f.write("".join(l + "\n" for l in restantes))
-        envoyees = len(lignes) - len(restantes)
-        if envoyees:
-            print(f"[SHEETS] {envoyees} ligne(s) de secours renvoyées vers Google.")
-            noter_ecriture(os.path.basename(fichier), "REJOUÉ", f"{envoyees} ligne(s) de secours envoyées à Google")
+            f.write("".join(l + "\n" for l in actuelles if l not in envoyees))
+    print(f"[SHEETS] {len(envoyees)} ligne(s) de secours renvoyées vers Google.")
+    noter_ecriture(os.path.basename(fichier), "REJOUÉ", f"{len(envoyees)} ligne(s) en attente envoyées à Google")
 
 
 def _indice_erreur_script(resume):
@@ -632,46 +682,101 @@ def _indice_erreur_script(resume):
     return ""
 
 
-def ajouter_ligne(fichier, donnees, webhook_url=None):
-    """Enregistre un événement (commande ou alerte) de façon durable.
-    Priorité : Google Sheets (webhook_url), si configuré et accessible.
-    Sinon : fichier local .jsonl en secours (temporaire sur Render gratuit).
-    Le tableau de bord relit aussi ce fichier de secours : rien ne disparaît."""
+def _poster_ligne(url, donnees, timeout):
+    """Envoie une ligne à un Google Sheet. Renvoie ("ok" | "deja" | "echec", détail).
+    Sans danger de la renvoyer : le script Google ignore une « Ref » déjà présente ("deja")."""
+    try:
+        r = requests.post(url, json=_avec_cle(donnees), timeout=timeout)
+        succes, resume = _analyser_reponse_webhook(r)
+        if succes:
+            try:
+                return ("deja" if r.json().get("deja") else "ok"), ""
+            except ValueError:
+                return "ok", ""
+        return "echec", resume + _indice_erreur_script(resume)
+    except requests.exceptions.Timeout:
+        return "echec", f"Google n'a pas répondu en {timeout} s"
+    except Exception as e:
+        return "echec", str(e)
+
+
+def _fichier_attente(fichier, i):
+    return fichier if i == 0 else f"{fichier}.m{i}"
+
+
+def ajouter_ligne(fichier, donnees, webhook_url=None, timeout=45):
+    """Enregistre une ligne (commande ou alerte) de façon DURABLE.
+    Écrit en parallèle dans le Sheet principal et dans son miroir (s'il existe).
+    Renvoie : "ok" (écrite), "deja" (déjà présente), "local" (aucun Sheet configuré),
+    ou "" si AUCUN Sheet n'a confirmé : la ligne est alors gardée dans un fichier d'attente
+    (renvoyée automatiquement toutes les minutes) mais n'est PAS considérée comme sûre.
+    Toute ligne reçoit une « Ref » : renvoyer deux fois ne crée jamais de doublon."""
     donnees = dict(donnees)
-    donnees["Date"] = datetime.now().isoformat(timespec="seconds")
+    donnees.setdefault("Date", datetime.now().isoformat(timespec="seconds"))
+    donnees.setdefault("Ref", _nouvelle_ref("L"))
     nom = os.path.basename(fichier)
 
-    if webhook_url:
-        try:
-            # Écriture en arrière-plan : personne n'attend, on peut être patient
-            r = requests.post(webhook_url, json=_avec_cle(donnees), timeout=45)
-            succes, resume = _analyser_reponse_webhook(r)
-            if succes:
-                print(f"[SHEETS] OK ({nom}) : ligne ajoutée dans Google Sheets.")
-                noter_ecriture(nom, "OK")
-                _rejouer_secours(fichier, webhook_url)  # renvoie ce qui avait été mis de côté
-                return  # écrit avec succès, terminé
-            print(f"[SHEETS] ÉCHEC ({nom}) : {resume}. Écriture locale en secours.")
-            noter_ecriture(nom, "ÉCHEC → secours local", resume + _indice_erreur_script(resume))
-        except requests.exceptions.Timeout:
-            # Google a reçu la ligne mais tarde à répondre : elle est très probablement
-            # enregistrée. On n'écrit pas en local pour éviter un doublon.
-            print(f"[SHEETS] DÉLAI DÉPASSÉ ({nom}) : ligne probablement enregistrée par Google.")
-            noter_ecriture(nom, "DÉLAI (probablement enregistré)", "Google a mis plus de 45 s à répondre")
-            return
-        except Exception as e:
-            print(f"[SHEETS] ERREUR ({nom}) : {e}. Écriture locale en secours.")
-            noter_ecriture(nom, "ERREUR → secours local", e)
-    else:
+    if not webhook_url:
         print(f"[SHEETS] Aucun webhook configuré pour {nom} : écriture locale uniquement.")
+        _mettre_en_attente(fichier, donnees)
+        return "local"
 
-    # Secours local (ou comportement par défaut si aucun webhook configuré)
+    urls = [webhook_url] + MIROIRS.get(webhook_url, [])
+    resultats = list(_pool_miroirs.map(lambda u: _poster_ligne(u, donnees, timeout), urls)) if len(urls) > 1 \
+        else [_poster_ligne(webhook_url, donnees, timeout)]
+    reussi = [etat for etat, _ in resultats if etat in ("ok", "deja")]
+    for i, (etat, detail) in enumerate(resultats):
+        etiquette = nom if i == 0 else nom + " (copie " + str(i) + ")"
+        if etat == "echec":
+            print(f"[SHEETS] ÉCHEC ({etiquette}) : {detail}")
+            noter_ecriture(etiquette, "ÉCHEC → mise en attente", detail)
+            _mettre_en_attente(_fichier_attente(fichier, i), donnees)
+        else:
+            print(f"[SHEETS] OK ({etiquette}) : {etat}")
+            noter_ecriture(etiquette, "OK" if etat == "ok" else "déjà présente")
+            _rejouer_secours(_fichier_attente(fichier, i), urls[i])
+    if not reussi:
+        return ""
+    return "deja" if all(e == "deja" for e in reussi) else "ok"
+
+
+def _mettre_en_attente(fichier, donnees):
     with _verrou_secours:
         with open(fichier, "a", encoding="utf-8") as f:
             f.write(json.dumps(donnees, ensure_ascii=False) + "\n")
 
 
+def _compter_attente():
+    """Nombre de lignes pas encore confirmées par Google (tous fichiers d'attente confondus)."""
+    total = 0
+    for fichier, url in ((COMMANDES_FILE, COMMANDES_WEBHOOK_URL), (ALERTES_FILE, ALERTES_WEBHOOK_URL)):
+        if not url:
+            continue
+        for i in range(1 + len(MIROIRS.get(url, []))):
+            f = _fichier_attente(fichier, i)
+            if os.path.exists(f):
+                with _verrou_secours:
+                    with open(f, encoding="utf-8") as h:
+                        total += sum(1 for l in h if l.strip())
+    return total
+
+
+def _boucle_rejeu():
+    """Toutes les minutes : renvoie vers Google les lignes restées en attente (Google en panne, coupure...)."""
+    while True:
+        time.sleep(60)
+        try:
+            for fichier, url in ((COMMANDES_FILE, COMMANDES_WEBHOOK_URL), (ALERTES_FILE, ALERTES_WEBHOOK_URL)):
+                if not url:
+                    continue
+                for i, u in enumerate([url] + MIROIRS.get(url, [])):
+                    _rejouer_secours(_fichier_attente(fichier, i), u)
+        except Exception as e:
+            print("[SHEETS] rejeu :", e)
+
+
 _pool_ecriture = ThreadPoolExecutor(max_workers=4)
+_pool_miroirs = ThreadPoolExecutor(max_workers=4)   # séparé : évite qu'une tâche attende une place dans son propre pool
 
 
 _evenements = []  # 20 derniers événements (commande / à traiter) pour l'alarme sonore du tableau de bord
@@ -1054,20 +1159,29 @@ def generer_reponse(identifiant_client, texte_client, client=None, historique=No
             return resultat
         if resume:
             _commandes_chat_vues[empreinte] = maintenant
-            decrementer_stock(retenues)
         detail = "📝 " + texte_client[:500]
         if resume:
             detail += "\n🧾 " + " · ".join(resume)
         if remarques:
             detail += "\n⚠️ À vérifier : " + " ; ".join(remarques)
-        ajouter_ligne_arriere_plan(COMMANDES_FILE, {
+        # Référence calculée à partir du client et de la commande (par tranche de 10 min) : si le même
+        # message est rejoué, Google reconnaît la commande et ne la double pas.
+        ref = "C" + hashlib.sha1(f"{empreinte}|{int(maintenant // 600)}".encode()).hexdigest()[:14]
+        etat = enregistrer_commande_durable(ref, {
             **champs,
-            **_suivi_commande(retenues),
+            **_suivi_commande(retenues, ref),
             "Message": texte_client + (" [À VÉRIFIER : " + " ; ".join(remarques) + "]" if remarques else ""),
             "Total MRU": total,
             "Livraison": commande.get("date_livraison_souhaitee", ""),
-        }, webhook_url=COMMANDES_WEBHOOK_URL,
-            alerte=_texte_alerte("commande", champs, detail, total))
+        }, _texte_alerte("commande", champs, detail, total),
+            f"⚠️ COMMANDE NON ENREGISTRÉE dans Google ({champs.get('Client', '')}, {total} MRU) : notez-la. {texte_client[:300]}")
+        if not etat:
+            _commandes_chat_vues.pop(empreinte, None)   # le client pourra renvoyer sa confirmation
+            resultat["reponse_client"] = ("⚠️ Un problème technique a empêché d'enregistrer votre commande. "
+                                          "Elle n'est PAS encore confirmée. Écrivez « confirmer » dans une minute, "
+                                          "ou utilisez l'onglet « Commander ».")
+        elif resume:
+            decompter_une_fois(ref, retenues)
 
     return resultat
 
@@ -1214,6 +1328,7 @@ PAGE_ADMIN_PRODUITS = """<!DOCTYPE html>
        <div><label>Stock disponible</label><input class="f-stock" type="number" inputmode="numeric"></div>
        <div><label>Unité (carton, pack...)</label><input class="f-unite"></div>
        <div><label>Code (L, Y...)</label><input class="f-code"></div>
+       <div class="large"><label>Catégorie (Lait, Yaourt, Jus...)</label><input class="f-cat" maxlength="40"></div>
      </div></div>
      <div class="actions">
        <label class="btnphoto">📷 Photo<input type="file" accept="image/*" class="f-photo"></label>
@@ -1231,6 +1346,7 @@ PAGE_ADMIN_PRODUITS = """<!DOCTYPE html>
    d.querySelector(".f-stock").value=p.stock_disponible??"";
    d.querySelector(".f-unite").value=p.unite||"";
    d.querySelector(".f-code").value=p.code||"";
+   d.querySelector(".f-cat").value=p.categorie||"";
    majVignette();
    d.querySelector(".f-photo").onchange=async(e)=>{
      const f=e.target.files[0]; if(!f) return;
@@ -1243,7 +1359,7 @@ PAGE_ADMIN_PRODUITS = """<!DOCTYPE html>
        prix_unitaire_mru:Number(d.querySelector(".f-prix").value||0),
        stock_disponible:Number(d.querySelector(".f-stock").value||0),
        unite:d.querySelector(".f-unite").value.trim(),
-       code:d.querySelector(".f-code").value.trim(), photo};
+       code:d.querySelector(".f-code").value.trim(), categorie:d.querySelector(".f-cat").value.trim(), photo};
      try{
        const r=await fetch("/admin/produits/enregistrer?cle="+encodeURIComponent(CLE),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(corps)});
        const j=await r.json();
@@ -1269,6 +1385,7 @@ PAGE_ADMIN_PRODUITS = """<!DOCTYPE html>
 
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+threading.Thread(target=_boucle_rejeu, daemon=True).start()
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024   # refuse toute requête de plus de 100 Ko
 
 
@@ -1431,8 +1548,37 @@ def chat_web():
 
 @app.route("/catalogue", methods=["GET"])
 def catalogue():
-    """Liste des produits pour le catalogue à boutons (photos, prix, stock)."""
-    return jsonify(lire_stock()), 200
+    """Liste des produits pour le catalogue à boutons (prix, stock, photos).
+    Les photos ne sont plus incluses (lourdes) : chaque produit reçoit une petite adresse /photo?...
+    que le téléphone garde en mémoire un an (l'adresse change quand la photo change)."""
+    sortie = []
+    for p in lire_stock():
+        q = dict(p)
+        photo = str(q.get("photo") or "")
+        if photo.startswith("data:image/"):
+            q["photo"] = "/photo?p=" + urllib.parse.quote(q["produit"]) + "&v=" + hashlib.sha1(photo.encode()).hexdigest()[:10]
+        sortie.append(q)
+    return jsonify(sortie), 200
+
+
+@app.route("/photo", methods=["GET"])
+def photo_produit():
+    """Sert la photo d'un produit comme une vraie image, avec cache long côté téléphone."""
+    nom = request.args.get("p", "")[:120]
+    for p in lire_stock():
+        if p["produit"] == nom:
+            m = re.fullmatch(r"data:image/(jpeg|png|webp|gif);base64,([A-Za-z0-9+/=]+)", str(p.get("photo") or ""))
+            if m:
+                try:
+                    corps = base64.b64decode(m.group(2))
+                except ValueError:
+                    break
+                rep = app.response_class(corps, mimetype="image/" + m.group(1))
+                rep.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                rep.headers["X-Content-Type-Options"] = "nosniff"
+                return rep
+            break
+    return "", 404
 
 
 @app.route("/commander", methods=["POST"])
@@ -1445,6 +1591,10 @@ def commander():
     id_client = str(data.get("id_client") or "web-anonyme")[:60]
     lignes = data.get("lignes") or []
     jour = data.get("livraison", "demain")
+    ref_client = str(data.get("ref") or "")
+    ref = ref_client if re.fullmatch(r"[A-Za-z0-9]{8,40}", ref_client) else _nouvelle_ref("C")
+    if ref in _commandes_ok:   # commande déjà confirmée (renvoi automatique du téléphone) : même réponse, rien n'est refait
+        return jsonify(_commandes_ok[ref]), 200
     client = _client_depuis(data)
     if not _client_valide(client):
         return jsonify({"ok": False, "profil_requis": True, "message":
@@ -1503,19 +1653,28 @@ def commander():
 
     date_liv = datetime.now() + timedelta(days=0 if jour == "aujourdhui" else 1)
     champs = _champs_client(id_client, client)
-    decrementer_stock(retenues)
-    ajouter_ligne_arriere_plan(COMMANDES_FILE, {
+    etat = enregistrer_commande_durable(ref, {
         **champs,
-        **_suivi_commande(retenues),
+        **_suivi_commande(retenues, ref),
         "Message": "Catalogue : " + " ; ".join(resume),
         "Total MRU": total,
         "Livraison": date_liv.strftime("%Y-%m-%d"),
-    }, webhook_url=COMMANDES_WEBHOOK_URL,
-        alerte=_texte_alerte("commande", champs,
-                             "🧾 " + "\n🧾 ".join(resume) + "\n🚚 Livraison : " + date_liv.strftime("%Y-%m-%d"), total))
-    print(f"[CATALOGUE] commande {client['nom']} ({client['tel']}) total={total}")
-    return jsonify({"ok": True, "total": total, "resume": resume,
-                    "livraison": date_liv.strftime("%Y-%m-%d")}), 200
+    }, _texte_alerte("commande", champs,
+                     "🧾 " + "\n🧾 ".join(resume) + "\n🚚 Livraison : " + date_liv.strftime("%Y-%m-%d"), total),
+        f"⚠️ COMMANDE NON ENREGISTRÉE dans Google ({client['nom']}, {total} MRU) : notez-la. "
+        + " ; ".join(resume) + " — livraison " + date_liv.strftime("%Y-%m-%d"))
+    if not etat:
+        _doublons.pop(empreinte, None)   # le renvoi automatique du téléphone doit pouvoir passer
+        return jsonify({"ok": False, "differe": True, "message":
+            "L'enregistrement est momentanément impossible. Votre commande est gardée sur votre téléphone "
+            "et sera renvoyée automatiquement. Ne la refaites pas."}), 200
+    decompter_une_fois(ref, retenues)
+    print(f"[CATALOGUE] commande {ref} {client['nom']} ({client['tel']}) total={total} : {etat}")
+    reponse = {"ok": True, "total": total, "resume": resume, "livraison": date_liv.strftime("%Y-%m-%d"), "ref": ref}
+    _commandes_ok[ref] = reponse
+    for k in list(_commandes_ok)[:-500]:
+        _commandes_ok.pop(k, None)
+    return jsonify(reponse), 200
 
 
 @app.route("/admin/produits", methods=["GET"])
@@ -1560,6 +1719,7 @@ def admin_produits_enregistrer():
         "Unité": d.get("unite", ""),
         "Photo": photo,
         "Code": d.get("code", ""),
+        "Categorie": str(d.get("categorie", ""))[:40],
     }
     try:
         r = requests.post(STOCK_WEBHOOK_URL, json=_avec_cle(envoi), timeout=20)
@@ -1579,7 +1739,7 @@ def admin_produits_enregistrer():
                     "stock_disponible": _entier(envoi["Stock disponible"]),
                     "prix_unitaire_mru": _entier(envoi["Prix unitaire (MRU)"]),
                     "unite": str(envoi["Unité"]).strip(), "photo": photo,
-                    "code": str(envoi["Code"]).strip(),
+                    "code": str(envoi["Code"]).strip(), "categorie": str(envoi["Categorie"]).strip(),
                 })
             vider_cache_stock()
             # Journal : trace de qui (adresse IP) a changé quoi, visible dans les Alertes (sans alarme)
@@ -1690,7 +1850,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-22d"
+VERSION = "2026-10-23b"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
@@ -2077,6 +2237,8 @@ def api_dashboard():
         "journal_ecritures": list(reversed(_journal_ecritures)),
         "ia": dict(_etat_ia, modeles=[GROQ_MODEL] + [m for m in MODELES_SECOURS if m != GROQ_MODEL]),
         "limites": dict(_etat_limites),
+        "donnees": {"en_attente": _compter_attente(), "copie_commandes": bool(COMMANDES_WEBHOOK_URL_2),
+                    "copie_alertes": bool(ALERTES_WEBHOOK_URL_2)},
         "push": dict(_etat_push, configure=push_configure(), appareils=len(_abonnements)),
         "notif": dict(_etat_notif, configure=bool(ALERTE_EMAIL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)),
                       email=ALERTE_EMAIL, telegram=bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)),
