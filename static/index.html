@@ -406,7 +406,7 @@
   function dessinerFiltres() {
     const z = document.getElementById("filtres");
     const cats = [...new Set(produits.map(p => (p.categorie || "").trim()).filter(Boolean))];
-    if (produits.length < 8 && !cats.length) { z.style.display = "none"; return; }   // petit catalogue : pas de filtres
+    if (!produits.length) { z.style.display = "none"; return; }
     z.style.display = "block"; z.innerHTML = "";
     const champ = document.createElement("input");
     champ.type = "search"; champ.value = recherche; champ.placeholder = "🔍 Chercher un produit…"; champ.setAttribute("aria-label", "Chercher un produit");
