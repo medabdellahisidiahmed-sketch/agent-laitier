@@ -226,6 +226,7 @@
   </main>
   <details id="diag" style="max-width:1180px;margin:0 auto;padding:0 14px;color:var(--gris);font-size:13px">
     <summary style="cursor:pointer;padding:8px 0">🔎 Diagnostic (enregistrements vers Google)</summary>
+    <div style="padding:4px 0" id="etat-donnees"></div>
     <div style="padding:4px 0" id="etat-limites"></div>
     <div style="padding:4px 0" id="etat-install"></div>
     <div style="padding:4px 0" id="etat-push"></div>
@@ -299,10 +300,11 @@
   // Statut + boutons d'action (uniquement pour les lignes qui ont une « Ref », donc créées avec cette version)
   const SUITE = {
     commande: { "Nouvelle":[["Confirmer","Confirmée"],["Annuler","Annulée"]], "Confirmée":[["Marquer livrée","Livrée"],["Annuler","Annulée"]],
-                "Livrée":[], "Annulée":[["Rétablir","Nouvelle"]] },
+                "Livrée":[], "Annulée":[["Rétablir","Nouvelle"]],
+                "Demande":[["Accepter","Confirmée"],["Refuser","Refusée"]], "Refusée":[["Rétablir","Demande"]] },
     alerte:   { "À traiter":[["✓ Traitée","Traitée"]], "Traitée":[["Rouvrir","À traiter"]] }
   };
-  const COULEUR_STATUT = { "Nouvelle":"orange", "Confirmée":"", "Livrée":"vert", "Annulée":"rouge", "À traiter":"orange", "Traitée":"vert" };
+  const COULEUR_STATUT = { "Demande":"orange", "Refusée":"rouge", "Nouvelle":"orange", "Confirmée":"", "Livrée":"vert", "Annulée":"rouge", "À traiter":"orange", "Traitée":"vert" };
   function zoneStatut(l, type, ligne){
     if (!ligne.Ref || !ligne.Statut) return;
     const haut = el("div","bas"); haut.appendChild(el("span","badge " + (COULEUR_STATUT[ligne.Statut]||""), ligne.Statut)); l.appendChild(haut);
@@ -310,14 +312,16 @@
     if (!actions.length) return;
     const b = el("div","btns");
     actions.forEach(([texte, nouveau]) => {
-      const x = el("button", nouveau === "Annulée" ? "danger" : "", texte); x.type = "button";
+      const x = el("button", (nouveau === "Annulée" || nouveau === "Refusée") ? "danger" : "", texte); x.type = "button";
       x.onclick = async (e) => {
         e.stopPropagation();
         if (nouveau === "Annulée" && !confirm("Annuler cette commande ? Le stock sera remis.")) return;
+        let motif = "";
+        if (nouveau === "Refusée") { motif = prompt("Motif du refus (le client le verra) :", "Production complète ce jour-là"); if (motif === null) return; }
         b.querySelectorAll("button").forEach(y => y.disabled = true);
         try {
           const r = await fetch("/admin/api/statut", { method:"POST", headers:{ "X-Admin-Token": jeton, "Content-Type":"application/json" },
-                                                       body: JSON.stringify({ type: type, ref: ligne.Ref, statut: nouveau }) });
+                                                       body: JSON.stringify({ type: type, ref: ligne.Ref, statut: nouveau, motif: motif }) });
           const j = await r.json().catch(() => ({}));
           if (!r.ok || !j.ok) { bandeau(j.message || "Le statut n'a pas pu être changé."); }
           else if (/⚠️/.test(j.message || "")) { bandeau(j.message); }
@@ -412,6 +416,10 @@
       " · modèles prévus : " + (ia.modeles||[]).join(" → ") +
       (ia.requetes_restantes_jour ? " · requêtes restantes aujourd'hui (modèle courant) : " + ia.requetes_restantes_jour : "") +
       (ia.nb_plafonds ? " · plafond gratuit atteint " + ia.nb_plafonds + " fois, dernier : " + ia.dernier_plafond : " · plafond gratuit jamais atteint");
+    const dn = d.donnees || {};
+    $("etat-donnees").textContent = "Sécurité des données : " + (dn.en_attente ? dn.en_attente + " ligne(s) en attente d'envoi vers Google (renvoi automatique chaque minute)" : "tout est enregistré dans Google")
+      + " · copie de secours des commandes : " + (dn.copie_commandes ? "✅ active" : "❌ non configurée (voir le guide)")
+      + " · des alertes : " + (dn.copie_alertes ? "✅ active" : "❌ non configurée");
     const li = d.limites || {};
     $("etat-limites").textContent = "Protection anti-abus : " + (li.bloques ? li.bloques + " demande(s) bloquée(s) depuis le démarrage · dernière : " + li.derniere + " (" + li.detail + ")" : "aucune demande bloquée depuis le démarrage");
     const pu = d.push || {};
@@ -481,11 +489,15 @@
       b.onclick = () => montrer(ou_); lt.appendChild(b);
     };
     const st = d.stock_resume;
+    if ((d.donnees || {}).en_attente > 0) ligneTodo("🛟", d.donnees.en_attente + " ligne(s) pas encore dans Google", "Google ne répond pas : renvoi automatique toutes les minutes. Les commandes restent notées dans vos alertes.", "commandes");
     if (st.rupture > 0) ligneTodo("⛔", st.rupture + " produit(s) en rupture", d.stock.filter(p => p.niveau==="rupture").map(p => p.produit).join(", "), "stock");
     if (st.bas > 0) ligneTodo("⚠️", st.bas + " produit(s) en stock bas", d.stock.filter(p => p.niveau==="bas").map(p => p.produit).join(", "), "stock");
     const rec = d.alertes_par_categorie.RECLAMATION || 0, cre = d.alertes_par_categorie.CREDIT_PAIEMENT || 0;
     if (rec > 0) ligneTodo("💬", rec + " réclamation(s) à traiter", "7 derniers jours", "alertes");
     if (cre > 0) ligneTodo("💳", cre + " demande(s) de crédit / paiement", "7 derniers jours", "alertes");
+    if (!errC && k.cmd_demandes > 0) ligneTodo("📅", k.cmd_demandes + " demande(s) de livraison à accepter ou refuser", "", "commandes");
+    Object.entries(d.a_preparer || {}).slice(0, 5).forEach(([jour, prod]) => ligneTodo("📦", "À préparer le " + jour.slice(8,10) + "/" + jour.slice(5,7),
+      Object.entries(prod).map(([n, q]) => q + " " + n).join(" · "), "commandes"));
     if (!errC && k.cmd_nouvelles > 0) ligneTodo("🆕", k.cmd_nouvelles + " commande(s) à confirmer", "", "commandes");
     if (!errC && k.livraison_aujourdhui > 0) ligneTodo("🚚", k.livraison_aujourdhui + " livraison(s) prévue(s) aujourd'hui", "", "commandes");
     if (!lt.children.length) { const o = el("div","todo ok"); o.appendChild(el("span","pic","✅")); o.appendChild(el("span","txt","Rien d'urgent pour le moment.")); lt.appendChild(o); }

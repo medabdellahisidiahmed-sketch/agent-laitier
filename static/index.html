@@ -198,7 +198,9 @@
     <div class="jours">
       <button data-j="aujourdhui">Aujourd'hui</button>
       <button data-j="demain" class="actif">Demain</button>
+      <button data-j="date" id="j-date" type="button">📅 Autre date</button>
     </div>
+    <input type="date" id="j-input" tabindex="-1" aria-hidden="true" style="position:absolute;opacity:0;pointer-events:none;width:1px;height:1px">
     <button id="refaire" type="button" style="display:none;width:100%;margin-bottom:8px;padding:12px;border:1.5px solid #1B4D8C;border-radius:12px;background:#fff;color:#1B4D8C;font-size:15px;font-weight:600">🔁 Refaire ma dernière commande</button>
     <button id="valider">✅ Commander — <span id="total">0</span> MRU</button>
   </div>
@@ -216,12 +218,12 @@
   </div></div>
 
   <div id="confirmation"><div class="carte">
-    <div class="coche">✅</div>
-    <h2>Commande reçue !</h2>
+    <div class="coche" id="conf-coche">✅</div>
+    <h2 id="conf-titre">Commande reçue !</h2>
     <ul id="conf-lignes"></ul>
     <div class="total">Total : <span id="conf-total"></span> MRU</div>
     <div class="liv">Livraison : <span id="conf-liv"></span></div>
-    <div class="liv">Nous vous contacterons pour confirmer.</div>
+    <div class="liv" id="conf-note">Nous vous contacterons pour confirmer.</div>
     <button id="conf-ok">OK</button>
   </div></div>
 
@@ -462,10 +464,25 @@
     majTotal();
   }
 
-  document.querySelectorAll(".jours button").forEach(b => b.onclick = () => {
+  const btnDate = document.getElementById("j-date"), inpDate = document.getElementById("j-input");
+  const isoLocal = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  const dansJours = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d; };
+  inpDate.min = isoLocal(dansJours(0)); inpDate.max = isoLocal(dansJours(30));
+  const dateLongue = (iso) => { try { return new Date(iso + "T12:00:00").toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" }); } catch (e) { return iso; } };
+  const choisirJour = (b, j) => {
     document.querySelectorAll(".jours button").forEach(x => x.classList.remove("actif"));
-    b.classList.add("actif"); jourLivraison = b.dataset.j;
+    b.classList.add("actif"); jourLivraison = j;
+  };
+  document.querySelectorAll(".jours button").forEach(b => b.onclick = () => {
+    if (b.dataset.j === "date") { try { inpDate.showPicker ? inpDate.showPicker() : inpDate.click(); } catch (e) { inpDate.click(); } return; }
+    choisirJour(b, b.dataset.j); btnDate.textContent = "📅 Autre date";
   });
+  inpDate.onchange = () => {
+    if (!inpDate.value) return;
+    choisirJour(btnDate, inpDate.value);
+    btnDate.textContent = "📅 " + inpDate.value.slice(8, 10) + "/" + inpDate.value.slice(5, 7);
+  };
+  const estDemande = (j) => j !== "aujourdhui" && j !== "demain" && inpDate.value && inpDate.value >= isoLocal(dansJours(2));
 
   document.getElementById("valider").onclick = () => {
     if (!profil) { afficherProfil(false); return; }
@@ -481,7 +498,8 @@
       t += quantites[p.produit] * p.prix_unitaire_mru;
     });
     document.getElementById("recap-total").textContent = t;
-    document.getElementById("recap-liv").textContent = jourLivraison === "aujourdhui" ? "Aujourd'hui" : "Demain";
+    document.getElementById("recap-liv").textContent = jourLivraison === "aujourdhui" ? "Aujourd'hui" : jourLivraison === "demain" ? "Demain"
+      : dateLongue(jourLivraison) + (estDemande(jourLivraison) ? " (à confirmer par nous)" : "");
     document.getElementById("recap").style.display = "flex";
   };
 
@@ -511,12 +529,53 @@
     if (c) b.textContent = "⏳ Votre commande attend d'être envoyée. Elle part toute seule dès que la connexion revient. Ne la refaites pas.";
   }
 
+  // --- Suivi des demandes de livraison à une date choisie : une seule ligne en haut de page, seulement s'il y en a ---
+  const lireSuivi = () => { try { return JSON.parse(localStorage.getItem("demandes_suivies") || "[]"); } catch (e) { return []; } };
+  const ecrireSuivi = (l) => { try { localStorage.setItem("demandes_suivies", JSON.stringify(l.slice(-5))); } catch (e) {} };
+  function suivreDemande(ref, liv) { const l = lireSuivi().filter(x => x.ref !== ref); l.push({ ref: ref, liv: liv, t: Date.now() }); ecrireSuivi(l); majSuivi(); }
+  const TEXTE_SUIVI = (x) => {
+    const j = dateLongue(x.liv);
+    if (x.statut === "Confirmée" || x.statut === "Livrée") return "✅ Livraison du " + j + " : acceptée.";
+    if (x.statut === "Refusée") return "❌ Livraison du " + j + " : refusée" + (x.motif ? " (" + x.motif + ")" : "") + ". Choisissez une autre date.";
+    if (x.statut === "Annulée") return "❌ Livraison du " + j + " : annulée.";
+    return "⏳ Livraison du " + j + " : en attente de notre confirmation.";
+  };
+  const FINAUX = ["Confirmée", "Livrée", "Refusée", "Annulée"];
+  async function majSuivi() {
+    let l = lireSuivi().filter(x => Date.now() - x.t < 40 * 86400000);
+    for (const x of l) {
+      if (x.statut && FINAUX.includes(x.statut) && x.vu) continue;
+      try { const r = await fetch("/statut-commande?ref=" + encodeURIComponent(x.ref)); const d = await r.json(); if (d.ok && d.statut !== "inconnu") { x.statut = d.statut; x.motif = d.motif || ""; } } catch (e) {}
+    }
+    ecrireSuivi(l);
+    let b = document.getElementById("suivi");
+    const visibles = l.filter(x => !(x.statut && FINAUX.includes(x.statut) && x.vu));
+    if (!visibles.length) { if (b) b.style.display = "none"; return; }
+    if (!b) {
+      b = document.createElement("div"); b.id = "suivi";
+      b.style.cssText = "background:#EAF2FF;color:#1B4D8C;padding:10px 12px;font-size:14px;font-weight:600;text-align:center;cursor:pointer";
+      zoneCat.parentNode.insertBefore(b, zoneCat);
+      b.onclick = () => { const m = lireSuivi(); m.forEach(x => { if (x.statut && FINAUX.includes(x.statut)) x.vu = true; }); ecrireSuivi(m); majSuivi(); };
+    }
+    b.style.display = "block"; b.innerHTML = "";
+    visibles.forEach(x => { const p = document.createElement("div"); p.textContent = TEXTE_SUIVI(x); b.appendChild(p); });
+    if (visibles.some(x => FINAUX.includes(x.statut))) { const p = document.createElement("div"); p.style.cssText = "font-weight:400;font-size:12px;margin-top:4px"; p.textContent = "Touchez ici pour fermer ce message."; b.appendChild(p); }
+  }
+  setInterval(() => { if (lireSuivi().length) majSuivi(); }, 60000);
+  setTimeout(majSuivi, 1500);
+
   function montrerConfirmation(d, lignes) {
     const ul = document.getElementById("conf-lignes");
     ul.innerHTML = "";
     d.resume.forEach(t => { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); });
     document.getElementById("conf-total").textContent = d.total;
-    document.getElementById("conf-liv").textContent = d.livraison;
+    document.getElementById("conf-liv").textContent = d.demande ? dateLongue(d.livraison) : d.livraison;
+    document.getElementById("conf-coche").textContent = d.demande ? "📅" : "✅";
+    document.getElementById("conf-titre").textContent = d.demande ? "Demande envoyée !" : "Commande reçue !";
+    document.getElementById("conf-note").textContent = d.demande
+      ? "Nous confirmons selon notre production. Vous verrez notre réponse en haut de cette page."
+      : "Nous vous contacterons pour confirmer.";
+    if (d.demande && d.ref) { suivreDemande(d.ref, d.livraison); }
     document.getElementById("confirmation").style.display = "flex";
     try { const m = {}; lignes.forEach(l => { m[l.produit] = l.quantite; }); localStorage.setItem("derniere_commande", JSON.stringify(m)); } catch (e) {}
     quantites = {}; dessinerCatalogue();
