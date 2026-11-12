@@ -342,7 +342,8 @@ def _texte_alerte(type_, client_champs, details, total=None):
     """Texte court de l'alerte : qui, où, quoi, et un lien WhatsApp direct."""
     tel = (client_champs.get("Telephone") or "").strip()
     wa = (client_champs.get("WhatsApp") or tel).strip()
-    lignes = [("🛒 NOUVELLE COMMANDE" if type_ == "commande" else "⚠️ À TRAITER (" + type_ + ")"),
+    lignes = [("🛒 NOUVELLE COMMANDE" if type_ == "commande" else "📅 DEMANDE DE LIVRAISON À CONFIRMER" if type_ == "demande"
+               else "⚠️ À TRAITER (" + type_ + ")"),
               f"👤 {client_champs.get('Client', '')}"]
     if client_champs.get("Quartier"):
         lignes.append(f"📍 {client_champs['Quartier']}")
@@ -453,7 +454,98 @@ def decrementer_stock(retenues, sens=-1):
     _pool_ecriture.submit(tache)
 
 
-STATUTS_CMD = ["Nouvelle", "Confirmée", "Livrée", "Annulée"]
+STATUTS_CMD = ["Nouvelle", "Demande", "Confirmée", "Livrée", "Annulée", "Refusée"]
+# Livraison à une date choisie : « Demande » = commande pour après-demain ou plus tard, à accepter ou refuser par le responsable.
+_JOURS_FR = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+try:
+    LIV_JOURS_MAX = max(2, int(os.environ.get("LIV_JOURS_MAX", "14") or 14))   # jusqu'à combien de jours à l'avance
+except ValueError:
+    LIV_JOURS_MAX = 14
+LIV_JOURS_SANS = {j for j in re.split(r"[,;\s]+", os.environ.get("LIV_JOURS_SANS", "").lower()) if j in _JOURS_FR}
+_demandes_refs = set()  # refs des demandes créées depuis le dernier démarrage
+_motifs = {}            # ref -> motif de refus (mémoire)
+
+
+def _date_livraison(jour):
+    """(date, demande, message d'erreur). « aujourdhui » / « demain » ou une date AAAA-MM-JJ choisie par le client."""
+    auj = datetime.now().date()
+    if jour == "aujourdhui":
+        return auj, False, ""
+    if jour in ("demain", "", None):
+        return auj + timedelta(days=1), False, ""
+    try:
+        d = datetime.strptime(str(jour)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None, False, "Date de livraison invalide. Choisissez-la dans le calendrier."
+    if d < auj:
+        return None, False, "Cette date est déjà passée. Choisissez une date à venir."
+    if d > auj + timedelta(days=LIV_JOURS_MAX):
+        return None, False, f"Nous livrons au plus tard {LIV_JOURS_MAX} jours à l'avance. Choisissez une date plus proche."
+    if _JOURS_FR[d.weekday()] in LIV_JOURS_SANS:
+        return None, False, f"Pas de livraison le {_JOURS_FR[d.weekday()]}. Choisissez un autre jour."
+    return d, (d - auj).days >= 2, ""
+
+
+def _est_demande(ligne):
+    """Une commande est une « demande » si sa date de livraison est au moins 2 jours après sa création."""
+    ref = str(ligne.get("Ref") or "").strip()
+    if ref in _demandes_refs:
+        return True
+    try:
+        cree = datetime.strptime(str(ligne.get("Date") or "")[:10], "%Y-%m-%d").date()
+        livre = datetime.strptime(str(ligne.get("Livraison") or "")[:10], "%Y-%m-%d").date()
+        return (livre - cree).days >= 2
+    except ValueError:
+        return False
+
+
+def _stock_retire(statut, demande):
+    """Le stock est-il décompté pour une commande dans cet état ? Commande normale : tant qu'elle n'est pas annulée.
+    Demande : seulement quand le responsable l'a acceptée (Confirmée, puis Livrée)."""
+    if demande:
+        return statut in ("Confirmée", "Livrée")
+    return statut not in ("Annulée", "Refusée")
+
+
+def _detail_ligne(ligne):
+    ref = str(ligne.get("Ref") or "").strip()
+    d = _lignes_refs.get(ref)
+    if d is None:
+        try:
+            d = json.loads(str(ligne.get("Detail") or "null"))
+        except ValueError:
+            d = None
+    return d if isinstance(d, list) else []
+
+
+def _lignes_commandes_connues():
+    entree = _cache_feuilles.get((COMMANDES_WEBHOOK_URL, COMMANDES_FILE))
+    return (entree["v"].get("lignes", []) if entree else []) + (lire_lignes_jsonl(COMMANDES_FILE) if COMMANDES_WEBHOOK_URL else [])
+
+
+def _a_preparer(lignes):
+    """{date: {produit: quantité}} des commandes à livrer après aujourd'hui, ni annulées, ni refusées, ni livrées.
+    `lignes` : lignes de commandes dont le statut est déjà à jour."""
+    auj = datetime.now().date().isoformat()
+    sortie = {}
+    for l in lignes:
+        if l.get("Statut") in ("Annulée", "Refusée", "Livrée", ""):
+            continue
+        j = str(l.get("Livraison") or "")[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", j) or j <= auj:
+            continue
+        for nom, qte in _detail_ligne(l):
+            try:
+                sortie.setdefault(j, {})[nom] = sortie.get(j, {}).get(nom, 0) + int(qte)
+            except (TypeError, ValueError):
+                pass
+    return sortie
+
+
+def _liste_commandes_admin(commandes):
+    """Demandes à traiter d'abord (jamais cachées par les commandes récentes), puis les 6 dernières autres."""
+    attente = [c for c in commandes if c.get("Statut") == "Demande"]
+    return attente[:30] + [c for c in commandes if c.get("Statut") != "Demande"][:6]
 STATUTS_ALT = ["À traiter", "Traitée"]
 _statuts = {}          # ref -> statut (mémoire, appliqué par-dessus ce que renvoient les feuilles)
 _lignes_refs = {}      # ref -> [[produit, quantité]] des commandes récentes (secours si la colonne Detail manque)
@@ -465,14 +557,14 @@ def _nouvelle_ref(prefixe):
     return prefixe + datetime.now().strftime("%y%m%d%H%M%S") + secrets.token_hex(2)
 
 
-def _suivi_commande(retenues, ref=None):
+def _suivi_commande(retenues, ref=None, statut="Nouvelle"):
     """Colonnes de suivi ajoutées à chaque commande : Ref, Statut, Detail (pour remettre le stock si annulée)."""
     ref = ref or _nouvelle_ref("C")
     detail = [[n, int(q)] for n, q in retenues]
     _lignes_refs[ref] = detail
     for k in list(_lignes_refs)[:-300]:
         _lignes_refs.pop(k, None)
-    return {"Ref": ref, "Statut": "Nouvelle", "Detail": json.dumps(detail, ensure_ascii=False, separators=(",", ":"))}
+    return {"Ref": ref, "Statut": statut, "Detail": json.dumps(detail, ensure_ascii=False, separators=(",", ":"))}
 
 
 _decomptes = set()      # refs dont le stock a déjà été décompté (un renvoi ne décompte pas deux fois)
@@ -1599,6 +1691,9 @@ def commander():
     if not _client_valide(client):
         return jsonify({"ok": False, "profil_requis": True, "message":
             "Pour livrer votre commande, écrivez d'abord le nom de votre boutique et votre téléphone."}), 200
+    date_liv, demande, erreur_date = _date_livraison(jour)
+    if erreur_date:
+        return jsonify({"ok": False, "message": erreur_date}), 200
     if not isinstance(lignes, list) or len(lignes) > MAX_LIGNES_COMMANDE:
         return jsonify({"ok": False, "message": f"Commande trop grande (maximum {MAX_LIGNES_COMMANDE} produits différents). "
                         "Séparez-la en deux commandes."}), 200
@@ -1639,7 +1734,7 @@ def commander():
         if qte > MAX_QTE_LIGNE:
             _doublons.pop(empreinte, None)
             return jsonify({"ok": False, "message": f"Quantité trop grande (maximum {MAX_QTE_LIGNE} par produit)."}), 200
-        if qte > produit["stock_disponible"]:
+        if not demande and qte > produit["stock_disponible"]:   # une demande à date lointaine n'est pas refusée pour rupture
             _doublons.pop(empreinte, None)   # la commande a échoué : le client peut la corriger et renvoyer
             return jsonify({"ok": False, "message":
                 f"Désolé, il reste seulement {produit['stock_disponible']} {produit['produit']}."}), 200
@@ -1651,16 +1746,24 @@ def commander():
         _doublons.pop(empreinte, None)
         return jsonify({"ok": False, "message": "Aucun produit choisi."}), 200
 
-    date_liv = datetime.now() + timedelta(days=0 if jour == "aujourdhui" else 1)
     champs = _champs_client(id_client, client)
+    detail_alerte = "🧾 " + "\n🧾 ".join(resume) + "\n🚚 Livraison : " + date_liv.strftime("%Y-%m-%d")
+    if demande:
+        _demandes_refs.add(ref)
+        try:   # total à préparer ce jour-là (demandes et commandes déjà connues + celle-ci)
+            cumul = dict(_a_preparer(_appliquer_statuts(_lignes_commandes_connues(), "Nouvelle")).get(date_liv.isoformat(), {}))
+            for nom, qte in retenues:
+                cumul[nom] = cumul.get(nom, 0) + qte
+            detail_alerte += "\n📊 À préparer ce jour-là, avec cette demande : " + ", ".join(f"{q} {n}" for n, q in sorted(cumul.items()))
+        except Exception as e:
+            print("[DEMANDE] total par date indisponible :", e)
     etat = enregistrer_commande_durable(ref, {
         **champs,
-        **_suivi_commande(retenues, ref),
+        **_suivi_commande(retenues, ref, "Demande" if demande else "Nouvelle"),
         "Message": "Catalogue : " + " ; ".join(resume),
         "Total MRU": total,
         "Livraison": date_liv.strftime("%Y-%m-%d"),
-    }, _texte_alerte("commande", champs,
-                     "🧾 " + "\n🧾 ".join(resume) + "\n🚚 Livraison : " + date_liv.strftime("%Y-%m-%d"), total),
+    }, _texte_alerte("demande" if demande else "commande", champs, detail_alerte, total),
         f"⚠️ COMMANDE NON ENREGISTRÉE dans Google ({client['nom']}, {total} MRU) : notez-la. "
         + " ; ".join(resume) + " — livraison " + date_liv.strftime("%Y-%m-%d"))
     if not etat:
@@ -1668,9 +1771,10 @@ def commander():
         return jsonify({"ok": False, "differe": True, "message":
             "L'enregistrement est momentanément impossible. Votre commande est gardée sur votre téléphone "
             "et sera renvoyée automatiquement. Ne la refaites pas."}), 200
-    decompter_une_fois(ref, retenues)
-    print(f"[CATALOGUE] commande {ref} {client['nom']} ({client['tel']}) total={total} : {etat}")
-    reponse = {"ok": True, "total": total, "resume": resume, "livraison": date_liv.strftime("%Y-%m-%d"), "ref": ref}
+    if not demande:   # une demande ne touche pas au stock tant que le responsable ne l'a pas acceptée
+        decompter_une_fois(ref, retenues)
+    print(f"[CATALOGUE] {'demande' if demande else 'commande'} {ref} {client['nom']} ({client['tel']}) total={total} : {etat}")
+    reponse = {"ok": True, "total": total, "resume": resume, "livraison": date_liv.strftime("%Y-%m-%d"), "ref": ref, "demande": demande}
     _commandes_ok[ref] = reponse
     for k in list(_commandes_ok)[:-500]:
         _commandes_ok.pop(k, None)
@@ -1850,7 +1954,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-10-23b"
+VERSION = "2026-11-12"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
@@ -2090,6 +2194,27 @@ def _envoyer_statut(webhook, fichier, ref, statut, nom):
         print("[STATUT] ERREUR :", e)
 
 
+@app.route("/statut-commande", methods=["GET"])
+def statut_commande():
+    """Réponse du responsable à une demande de livraison : le téléphone du client la demande avec la référence
+    (longue, aléatoire) de sa commande. Ne renvoie que le statut, la date et le motif de refus."""
+    ref = str(request.args.get("ref") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{8,40}", ref):
+        return jsonify({"ok": False}), 400
+    depasse, _ = _depassement("stat:ip:" + _ip_client(), 120, 60)
+    if depasse:
+        return jsonify({"ok": False}), 429
+    statut = _statuts.get(ref)
+    livraison = ""
+    if not statut:
+        connues = _lire_feuille(COMMANDES_WEBHOOK_URL, COMMANDES_FILE).get("lignes", []) + \
+            (lire_lignes_jsonl(COMMANDES_FILE) if COMMANDES_WEBHOOK_URL else [])
+        ligne = next((l for l in connues if str(l.get("Ref") or "").strip() == ref), None)
+        if ligne:
+            statut, livraison = str(ligne.get("Statut") or "").strip(), _jour(ligne.get("Livraison"))
+    return jsonify({"ok": True, "statut": statut or "inconnu", "livraison": livraison, "motif": _motifs.get(ref, "")}), 200
+
+
 @app.route("/admin/api/statut", methods=["POST"])
 def api_statut():
     """Change le statut d'une commande (Nouvelle / Confirmée / Livrée / Annulée) ou d'une alerte
@@ -2113,18 +2238,23 @@ def api_statut():
             return jsonify({"ok": True, "message": "Déjà à ce statut."}), 200
         _statuts[ref] = statut
     notes = []
-    if type_ == "commande" and "Annulée" in (precedent, statut):
-        retenues = _lignes_refs.get(ref)
-        if retenues is None and ligne:
-            try:
-                retenues = json.loads(str(ligne.get("Detail") or "null"))
-            except ValueError:
-                retenues = None
-        if retenues:
-            decrementer_stock([(n, q) for n, q in retenues], +1 if statut == "Annulée" else -1)
-            notes.append("Stock remis." if statut == "Annulée" else "Stock retiré de nouveau.")
-        else:
-            notes.append("⚠️ Détail de la commande introuvable (colonne « Detail » absente ?) : corrigez le stock à la main.")
+    if statut == "Refusée":
+        _motifs[ref] = str(d.get("motif") or "").strip()[:120]
+    if type_ == "commande":
+        demande = ref in _demandes_refs or (ligne is not None and _est_demande(ligne))
+        avant, apres = _stock_retire(precedent, demande), _stock_retire(statut, demande)
+        if avant != apres:
+            retenues = _lignes_refs.get(ref)
+            if retenues is None and ligne:
+                try:
+                    retenues = json.loads(str(ligne.get("Detail") or "null"))
+                except ValueError:
+                    retenues = None
+            if retenues:
+                decrementer_stock([(n, q) for n, q in retenues], +1 if avant else -1)
+                notes.append("Stock remis." if avant else "Stock retiré.")
+            else:
+                notes.append("⚠️ Détail de la commande introuvable (colonne « Detail » absente ?) : corrigez le stock à la main.")
     if webhook and not _script_gere_statuts(webhook):
         notes.append("⚠️ Statut gardé en mémoire seulement : recollez le script Google (version « statuts ») dans la feuille " + nom + ".")
     else:
@@ -2161,7 +2291,7 @@ def api_dashboard():
     locales_alt = lire_lignes_jsonl(ALERTES_FILE) if ALERTES_WEBHOOK_URL else []
     commandes = sorted(_appliquer_statuts(cmd["lignes"] + locales_cmd, "Nouvelle"), key=lambda l: str(l.get("Date", "")), reverse=True)
     alertes = sorted(_appliquer_statuts(alt["lignes"] + locales_alt, "À traiter"), key=lambda l: str(l.get("Date", "")), reverse=True)
-    commandes_valides = [c for c in commandes if c.get("Statut") != "Annulée"]
+    commandes_valides = [c for c in commandes if c.get("Statut") not in ("Annulée", "Refusée")]
 
     def stats(lignes, locales):
         dates = [str(l.get("Date", "")) for l in lignes if l.get("Date")]
@@ -2227,10 +2357,12 @@ def api_dashboard():
             "livraison_demain": livraison_dem,
             "alertes_7j": len(alertes_7j),
             "cmd_nouvelles": sum(1 for c in commandes if c.get("Statut") == "Nouvelle"),
+            "cmd_demandes": sum(1 for c in commandes if c.get("Statut") == "Demande"),
         },
+        "a_preparer": dict(sorted(_a_preparer(commandes).items())[:7]),
         "serie_7j": [{"jour": j, **par_jour[j]} for j in jours],
         "alertes_par_categorie": categories,
-        "dernieres_commandes": [court(c, ["Date", "Client", "Telephone", "WhatsApp", "Quartier", "Message", "Total MRU", "Livraison", "Ref", "Statut"]) for c in commandes[:6]],
+        "dernieres_commandes": [court(c, ["Date", "Client", "Telephone", "WhatsApp", "Quartier", "Message", "Total MRU", "Livraison", "Ref", "Statut"]) for c in _liste_commandes_admin(commandes)],
         "dernieres_alertes": [court(a, ["Date", "Client", "Telephone", "WhatsApp", "Quartier", "Categorie", "Message", "Ref", "Statut"]) for a in alertes[:6]],
         "stock": stock,
         "stock_resume": stock_resume,
