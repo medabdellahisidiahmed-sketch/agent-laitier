@@ -217,7 +217,7 @@
     </section>
 
     <section class="section" id="s-commandes">
-      <div class="carte"><h2>Dernières commandes</h2><div class="vide" id="i-cmd"></div><div id="l-cmd"></div></div>
+      <div class="carte"><h2>Dernières commandes</h2><div class="vide" id="i-cmd"></div><div class="bas" id="enc-modes" style="display:none;margin-bottom:6px"></div><div id="l-cmd"></div></div>
     </section>
 
     <section class="section" id="s-alertes">
@@ -305,9 +305,53 @@
     alerte:   { "À traiter":[["✓ Traitée","Traitée"]], "Traitée":[["Rouvrir","À traiter"]] }
   };
   const COULEUR_STATUT = { "Demande":"orange", "Refusée":"rouge", "Nouvelle":"orange", "Confirmée":"", "Livrée":"vert", "Annulée":"rouge", "À traiter":"orange", "Traitée":"vert" };
+  const MODES = ["Espèces","Bankily","Masrvi","Sadad","Virement bancaire","Autre","Crédit"];
+  // Paiement : « Non payé » / « Partiel » / « Payé » + mode ; on enregistre le TOTAL déjà payé (versement ajouté à ce qui l'était)
+  function zonePaiement(l, ligne, haut){
+    if (["Annulée","Refusée","Demande"].includes(ligne.Statut)) return;
+    const total = Number(ligne["Total MRU"]) || 0, paye = Number(ligne["Montant paye"]) || 0, etat = ligne.Paiement || "Non payé";
+    let txt = etat;
+    if (etat === "Partiel") txt = "Partiel " + nf.format(paye) + " / " + nf.format(total);
+    else if (etat === "Payé" && ligne.Mode) txt = "Payé · " + ligne.Mode;
+    else if (etat === "Non payé" && ligne.Mode === "Crédit") txt = "À crédit";
+    haut.appendChild(document.createTextNode(" "));
+    haut.appendChild(el("span", "badge " + (etat === "Payé" ? "vert" : "orange"), txt));
+    const zone = el("div","btns"), ouvrir = el("button","", etat === "Payé" ? "💰 Corriger le paiement" : "💰 Enregistrer un paiement"); ouvrir.type = "button";
+    const form = el("div","btns"); form.hidden = true; form.style.alignItems = "center";
+    const sel = document.createElement("select"); sel.style.cssText = "padding:8px;border-radius:10px;border:1px solid #C9DBF3;font-size:14px";
+    MODES.filter(m => m !== "Crédit" || paye === 0).forEach(m => { const o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o); });
+    const inp = document.createElement("input"); inp.type = "number"; inp.min = "0"; inp.inputMode = "numeric"; inp.value = Math.max(0, total - paye);
+    inp.style.cssText = "width:110px;padding:8px;border-radius:10px;border:1px solid #C9DBF3;font-size:14px"; inp.title = "Versement reçu (MRU)";
+    const lib = el("span","bas","MRU reçus"); 
+    const ok = el("button","","Enregistrer"); ok.type = "button";
+    const raz = el("button","danger","Remettre à 0"); raz.type = "button"; raz.hidden = paye === 0;
+    form.append(sel, inp, lib, ok, raz);
+    form.onclick = (e) => e.stopPropagation();
+    ouvrir.onclick = (e) => { e.stopPropagation(); form.hidden = !form.hidden; };
+    const envoyer = async (montant, mode) => {
+      [ok, raz].forEach(y => y.disabled = true);
+      try {
+        const r = await fetch("/admin/api/paiement", { method:"POST", headers:{ "X-Admin-Token": jeton, "Content-Type":"application/json" },
+                                                       body: JSON.stringify({ ref: ligne.Ref, montant_paye: montant, mode: mode }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) bandeau(j.message || "Le paiement n'a pas pu être enregistré.");
+        else if (/attente/.test(j.message || "")) bandeau(j.message);
+        charger(true, true);
+      } catch (err) { bandeau("Connexion impossible : paiement non enregistré."); }
+      [ok, raz].forEach(y => y.disabled = false);
+    };
+    ok.onclick = (e) => { e.stopPropagation();
+      const v = Number(inp.value);
+      if (sel.value === "Crédit") { envoyer(paye, "Crédit"); return; }
+      if (!(v > 0)) { bandeau("Écrivez le montant reçu (plus de 0)."); return; }
+      envoyer(paye + v, sel.value); };
+    raz.onclick = (e) => { e.stopPropagation(); if (confirm("Remettre le paiement de cette commande à 0 ?")) envoyer(0, ""); };
+    zone.appendChild(ouvrir); l.appendChild(zone); l.appendChild(form);
+  }
   function zoneStatut(l, type, ligne){
     if (!ligne.Ref || !ligne.Statut) return;
     const haut = el("div","bas"); haut.appendChild(el("span","badge " + (COULEUR_STATUT[ligne.Statut]||""), ligne.Statut)); l.appendChild(haut);
+    if (type === "commande") zonePaiement(l, ligne, haut);
     const actions = (SUITE[type][ligne.Statut] || []);
     if (!actions.length) return;
     const b = el("div","btns");
@@ -495,6 +539,9 @@
     const rec = d.alertes_par_categorie.RECLAMATION || 0, cre = d.alertes_par_categorie.CREDIT_PAIEMENT || 0;
     if (rec > 0) ligneTodo("💬", rec + " réclamation(s) à traiter", "7 derniers jours", "alertes");
     if (cre > 0) ligneTodo("💳", cre + " demande(s) de crédit / paiement", "7 derniers jours", "alertes");
+    const enc = d.a_encaisser || {};
+    if (!errC && enc.nb > 0) ligneTodo("💰", enc.nb + " commande(s) livrée(s) à encaisser : " + nf.format(enc.total) + " MRU",
+      (enc.clients || []).map(c => c.client + " " + nf.format(c.reste)).join(" · "), "commandes");
     if (!errC && k.cmd_demandes > 0) ligneTodo("📅", k.cmd_demandes + " demande(s) de livraison à accepter ou refuser", "", "commandes");
     Object.entries(d.a_preparer || {}).slice(0, 5).forEach(([jour, prod]) => ligneTodo("📦", "À préparer le " + jour.slice(8,10) + "/" + jour.slice(5,7),
       Object.entries(prod).map(([n, q]) => q + " " + n).join(" · "), "commandes"));
@@ -503,6 +550,9 @@
     if (!lt.children.length) { const o = el("div","todo ok"); o.appendChild(el("span","pic","✅")); o.appendChild(el("span","txt","Rien d'urgent pour le moment.")); lt.appendChild(o); }
 
     // listes
+    const em = Object.entries(d.encaisse_par_mode || {}), zm = $("enc-modes");
+    zm.style.display = em.length ? "block" : "none";
+    zm.textContent = em.length ? "Encaissé sur les commandes affichées : " + em.map(([m, v]) => m + " " + nf.format(v)).join(" · ") + " MRU" : "";
     const lc = $("l-cmd"); lc.innerHTML = "";
     if (!d.dernieres_commandes.length) lc.appendChild(el("div","vide","Aucune commande pour le moment."));
     d.dernieres_commandes.forEach(c => {
