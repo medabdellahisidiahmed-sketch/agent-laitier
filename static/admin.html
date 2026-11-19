@@ -217,7 +217,7 @@
     </section>
 
     <section class="section" id="s-commandes">
-      <div class="carte"><h2>Dernières commandes</h2><div class="vide" id="i-cmd"></div><div class="bas" id="enc-modes" style="display:none;margin-bottom:6px"></div><div id="l-cmd"></div></div>
+      <div class="carte"><h2>Dernières commandes</h2><div class="vide" id="i-cmd"></div><div class="btns" id="filtre-cmd" style="display:none;margin:0 0 8px"></div><div class="bas" id="enc-modes" style="display:none;margin-bottom:6px"></div><div id="l-cmd"></div></div>
     </section>
 
     <section class="section" id="s-alertes">
@@ -405,6 +405,34 @@
     catch(e) { return { ok:false, statut:200, message:"Réponse illisible du serveur (mauvaise version de agent_laitier.py ?)." }; }
   }
 
+  // Commandes : « Récentes » (par défaut) ou « À encaisser » (toutes les livrées pas entièrement payées, les plus anciennes d'abord).
+  // Les deux boutons de choix n'apparaissent que s'il y a quelque chose à encaisser.
+  let derniereD = null, filtreCmd = "recentes";
+  function dessinerCommandes(){
+    const d = derniereD; if (!d) return;
+    const liste = d.a_encaisser_liste || [], nb = liste.length;
+    if (!nb) filtreCmd = "recentes";
+    const fz = $("filtre-cmd"); fz.style.display = nb ? "flex" : "none"; fz.innerHTML = "";
+    if (nb) [["recentes", "Récentes"], ["encaisser", "💰 À encaisser (" + nb + ")"]].forEach(([k, t]) => {
+      const b = el("button", "", t); b.type = "button"; if (filtreCmd === k) b.style.cssText = "background:var(--bleu);color:#fff";
+      b.onclick = () => { filtreCmd = k; dessinerCommandes(); }; fz.appendChild(b);
+    });
+    const lc = $("l-cmd"); lc.innerHTML = "";
+    const lignes = filtreCmd === "encaisser" ? liste : d.dernieres_commandes;
+    if (!lignes.length) lc.appendChild(el("div","vide","Aucune commande pour le moment."));
+    lignes.forEach(c => {
+      const l = el("div","ligne");
+      const h = el("div","haut"); h.appendChild(el("span","", c.Client || "Client")); h.appendChild(el("span","", nf.format(Number(c["Total MRU"])||0) + " MRU"));
+      l.appendChild(h);
+      const co = coordonnees(c); if (co) l.appendChild(co);
+      l.appendChild(el("div","bas", heure(c.Date) + (c.Livraison ? " · livraison " + String(c.Livraison).slice(0,10) : "")));
+      if (c.Message) l.appendChild(el("div","bas", c.Message));
+      zoneStatut(l, "commande", c);
+      rendreCliquable(l, c, true);
+      lc.appendChild(l);
+    });
+  }
+
   let enCours = false;
   async function charger(frais, silencieux){
     if (enCours) return;                       // une seule demande à la fois
@@ -542,6 +570,7 @@
     const enc = d.a_encaisser || {};
     if (!errC && enc.nb > 0) ligneTodo("💰", enc.nb + " commande(s) livrée(s) à encaisser : " + nf.format(enc.total) + " MRU",
       (enc.clients || []).map(c => c.client + " " + nf.format(c.reste)).join(" · "), "commandes");
+    if (!errC && enc.nb > 0) lt.lastChild.onclick = () => { filtreCmd = "encaisser"; dessinerCommandes(); montrer("commandes"); };
     if (!errC && k.cmd_demandes > 0) ligneTodo("📅", k.cmd_demandes + " demande(s) de livraison à accepter ou refuser", "", "commandes");
     Object.entries(d.a_preparer || {}).slice(0, 5).forEach(([jour, prod]) => ligneTodo("📦", "À préparer le " + jour.slice(8,10) + "/" + jour.slice(5,7),
       Object.entries(prod).map(([n, q]) => q + " " + n).join(" · "), "commandes"));
@@ -553,19 +582,7 @@
     const em = Object.entries(d.encaisse_par_mode || {}), zm = $("enc-modes");
     zm.style.display = em.length ? "block" : "none";
     zm.textContent = em.length ? "Encaissé sur les commandes affichées : " + em.map(([m, v]) => m + " " + nf.format(v)).join(" · ") + " MRU" : "";
-    const lc = $("l-cmd"); lc.innerHTML = "";
-    if (!d.dernieres_commandes.length) lc.appendChild(el("div","vide","Aucune commande pour le moment."));
-    d.dernieres_commandes.forEach(c => {
-      const l = el("div","ligne");
-      const h = el("div","haut"); h.appendChild(el("span","", c.Client || "Client")); h.appendChild(el("span","", nf.format(Number(c["Total MRU"])||0) + " MRU"));
-      l.appendChild(h);
-      const co = coordonnees(c); if (co) l.appendChild(co);
-      l.appendChild(el("div","bas", heure(c.Date) + (c.Livraison ? " · livraison " + String(c.Livraison).slice(0,10) : "")));
-      if (c.Message) l.appendChild(el("div","bas", c.Message));
-      zoneStatut(l, "commande", c);
-      rendreCliquable(l, c, true);
-      lc.appendChild(l);
-    });
+    derniereD = d; dessinerCommandes();
 
     const la = $("l-alt"); la.innerHTML = "";
     if (!d.dernieres_alertes.length) la.appendChild(el("div","vide","Aucune alerte. 👍"));
