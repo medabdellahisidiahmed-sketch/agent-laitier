@@ -237,3 +237,21 @@ Réglages Render (facultatifs) : `LIV_JOURS_MAX` (14 par défaut) et `LIV_JOURS_
 
 Limites : le motif de refus est gardé en mémoire (perdu si Render redémarre : le client voit alors « refusée » sans motif) ; les commandes passées par le chat gardent la date écrite par le client, sans calendrier ni demande.
 Aucune nouvelle colonne Google n'est nécessaire ; les scripts ne changent pas.
+
+## Suivi des paiements (Non payé / Partiel / Payé)
+
+Chaque commande a un état de paiement et un mode : Espèces, Bankily, Masrvi, Sadad, Virement bancaire, Autre, ou Crédit (livré, à payer plus tard). Rien ne change pour le client.
+
+**À faire une seule fois (sinon le bouton paiement répond « Paiement NON enregistré »)**
+1. Sheet **Commandes** : ajoutez en ligne 1, à la suite de `Detail`, les trois colonnes `Paiement`, `Mode`, `Montant paye` (exactement ainsi, sans accent).
+2. Dans Apps Script du Sheet Commandes : remplacez tout le code par le nouveau `AppsScript_Commandes_Alertes.gs`, remettez votre `CLE_SECRETE`, puis Déployer, Gérer les déploiements, modifier, **Nouvelle version**. L'adresse `/exec` ne change pas.
+3. Faites de même pour la copie miroir (Commandes copie), avec les mêmes colonnes.
+4. Remplacez `agent_laitier.py` et `static/admin.html` sur GitHub.
+
+**Utilisation** : dans « Commandes », sur chaque commande, « 💰 Enregistrer un paiement » : choisissez le mode, écrivez le montant reçu, Enregistrer. Les versements s'additionnent : 300 reçus puis 400 reçus = 700 payés. L'état passe tout seul à Partiel puis Payé. « Corriger le paiement » permet de se reprendre, « Remettre à 0 » efface.
+- L'accueil affiche « N commande(s) livrée(s) à encaisser » avec le reste dû et les clients qui doivent le plus.
+- En haut de « Commandes » : le total encaissé par mode, sur les commandes affichées.
+- Chaque enregistrement est aussi inscrit dans une feuille **Paiements** (créée automatiquement dans le Sheet Commandes) : date, commande, client, total payé, mode. C'est l'historique.
+- Un paiement n'est affiché comme enregistré qu'après la confirmation de Google. Si Google ne répond pas, le tableau de bord le dit et ne change rien.
+
+Limites : la colonne Mode garde le dernier mode utilisé (le journal Paiements garde le détail) ; le total encaissé par mode ne porte que sur les commandes récentes lues par le tableau de bord ; pas de facture ni de bon de livraison pour l'instant.
