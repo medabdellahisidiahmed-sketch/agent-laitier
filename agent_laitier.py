@@ -2523,6 +2523,10 @@ def api_dashboard():
         },
         "a_preparer": dict(sorted(_a_preparer(commandes).items())[:7]),
         "a_encaisser": _a_encaisser(commandes),
+        "a_encaisser_liste": [court(c, ["Date", "Client", "Telephone", "WhatsApp", "Quartier", "Message", "Total MRU", "Livraison", "Ref", "Statut", "Paiement", "Mode", "Montant paye"])
+                              for c in sorted((c for c in commandes if c.get("Statut") == "Livrée" and c.get("Ref")
+                                               and _nombre(c.get("Total MRU")) - _nombre(c.get("Montant paye")) > 0),
+                                              key=lambda c: str(c.get("Date", "")))[:100]],
         "encaisse_par_mode": _encaisse_par_mode(commandes),
         "serie_7j": [{"jour": j, **par_jour[j]} for j in jours],
         "alertes_par_categorie": categories,
