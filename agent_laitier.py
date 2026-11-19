@@ -542,6 +542,76 @@ def _a_preparer(lignes):
     return sortie
 
 
+# --- Paiement : « Non payé » / « Partiel » / « Payé », avec le mode utilisé ---
+MODES_PAIEMENT = ["Espèces", "Bankily", "Masrvi", "Sadad", "Virement bancaire", "Autre", "Crédit"]   # « Crédit » = livré, à payer plus tard
+_paiements = {}   # ref -> (heure, {"Paiement", "Mode", "Montant paye"}) : visible tout de suite, ensuite c'est la feuille qui fait foi
+_verrou_paiements = threading.Lock()
+_script_paiements = {}   # webhook -> (heure, True/False) : le script Google sait-il enregistrer un paiement ?
+
+
+def _etat_paiement(total, paye):
+    if total > 0 and paye >= total:
+        return "Payé"
+    return "Partiel" if paye > 0 else "Non payé"
+
+
+def _champs_paiement(ligne):
+    """(Paiement, Mode, Montant payé) d'une commande, recalculés depuis le total pour que les trois restent cohérents."""
+    ref = str(ligne.get("Ref") or "").strip()
+    vu = _paiements.get(ref)
+    if vu and time.time() - vu[0] < 120:
+        mode, paye = vu[1]["Mode"], vu[1]["Montant paye"]
+    else:
+        mode, paye = str(ligne.get("Mode") or "").strip(), _nombre(ligne.get("Montant paye"))
+    total = _nombre(ligne.get("Total MRU"))
+    return _etat_paiement(total, paye), mode, paye
+
+
+def _script_gere_paiements(webhook):
+    if not (webhook and SHEETS_CLE):
+        return False
+    vu = _script_paiements.get(webhook)
+    if vu and time.time() - vu[0] < (300 if vu[1] else 30):
+        return vu[1]
+    try:
+        r = requests.get(webhook, params={"action": "version", "cle": SHEETS_CLE}, timeout=15)
+        ok = r.json().get("paiements") is True
+    except Exception:
+        ok = False
+    _script_paiements[webhook] = (time.time(), ok)
+    return ok
+
+
+def _a_encaisser(commandes):
+    """Commandes livrées et pas entièrement payées : nombre, reste dû, et les 6 clients qui doivent le plus."""
+    par_client, nb, total = {}, 0, 0
+    for c in commandes:
+        if c.get("Statut") != "Livrée" or not c.get("Ref"):
+            continue
+        reste = _nombre(c.get("Total MRU")) - _nombre(c.get("Montant paye"))
+        if reste <= 0:
+            continue
+        nb += 1
+        total += reste
+        cle = str(c.get("Client") or "Client") + (" · " + str(c.get("Telephone")) if c.get("Telephone") else "")
+        par_client[cle] = par_client.get(cle, 0) + reste
+    top = sorted(par_client.items(), key=lambda x: -x[1])[:6]
+    return {"nb": nb, "total": int(total), "clients": [{"client": k, "reste": int(v)} for k, v in top]}
+
+
+def _encaisse_par_mode(commandes):
+    """Somme payée par mode, sur les commandes que le tableau de bord connaît (les plus récentes)."""
+    sortie = {}
+    for c in commandes:
+        if c.get("Statut") in ("Annulée", "Refusée") or not c.get("Ref"):
+            continue
+        paye = _nombre(c.get("Montant paye"))
+        if paye > 0:
+            m = str(c.get("Mode") or "Autre")
+            sortie[m] = sortie.get(m, 0) + int(paye)
+    return sortie
+
+
 def _liste_commandes_admin(commandes):
     """Demandes à traiter d'abord (jamais cachées par les commandes récentes), puis les 6 dernières autres."""
     attente = [c for c in commandes if c.get("Statut") == "Demande"]
@@ -1954,7 +2024,7 @@ _lectures_en_cours = {}  # (webhook, fichier) -> Future
 _verrou_lectures = threading.Lock()
 
 
-VERSION = "2026-11-12"
+VERSION = "2026-11-19"
 
 
 @app.route("/admin/api/evenements", methods=["GET"])
@@ -2138,6 +2208,8 @@ def _appliquer_statuts(lignes, defaut):
         ref = str(l.get("Ref") or "").strip()
         if ref:
             l["Statut"] = _statuts.get(ref) or str(l.get("Statut") or "").strip() or defaut
+            if defaut == "Nouvelle":   # commandes : ajoute l'état de paiement
+                l["Paiement"], l["Mode"], l["Montant paye"] = _champs_paiement(l)
         else:
             l["Statut"] = ""
         sortie.append(l)
@@ -2181,6 +2253,96 @@ def _maj_statut_local(fichier, ref, statut):
         if change:
             with open(fichier, "w", encoding="utf-8") as f:
                 f.write("\n".join(sortie) + "\n")
+
+
+def _maj_champs_local(fichier, ref, champs):
+    """Met à jour des colonnes d'une ligne encore dans le fichier d'attente local (elle partira à jour vers Google).
+    Renvoie True si la ligne y était."""
+    if not os.path.exists(fichier):
+        return False
+    with _verrou_secours:
+        with open(fichier, encoding="utf-8") as f:
+            lignes = [l for l in f.read().splitlines() if l.strip()]
+        sortie, change = [], False
+        for l in lignes:
+            try:
+                o = json.loads(l)
+            except ValueError:
+                sortie.append(l)
+                continue
+            if o.get("Ref") == ref:
+                o.update(champs)
+                change = True
+                l = json.dumps(o, ensure_ascii=False)
+            sortie.append(l)
+        if change:
+            with open(fichier, "w", encoding="utf-8") as f:
+                f.write("\n".join(sortie) + "\n")
+    return change
+
+
+@app.route("/admin/api/paiement", methods=["POST"])
+def api_paiement():
+    """Enregistre ce qu'une commande a déjà payé (montant TOTAL payé, pas le versement) et le mode de paiement.
+    Écrit dans Google AVANT de répondre : si Google n'a pas confirmé, le paiement n'est pas affiché comme enregistré."""
+    if not _admin_ok():
+        return jsonify({"ok": False, "message": "Accès refusé"}), 401
+    d = request.get_json(silent=True) or {}
+    ref, mode = str(d.get("ref", "")).strip(), str(d.get("mode", "")).strip()
+    try:
+        paye = int(round(float(d.get("montant_paye"))))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "Montant invalide."}), 400
+    if not re.fullmatch(r"[A-Za-z0-9]{6,40}", ref) or paye < 0 or mode not in MODES_PAIEMENT + [""]:
+        return jsonify({"ok": False, "message": "Demande invalide."}), 400
+    entree = _cache_feuilles.get((COMMANDES_WEBHOOK_URL, COMMANDES_FILE))
+    connues = (entree["v"].get("lignes", []) if entree else []) + lire_lignes_jsonl(COMMANDES_FILE)
+    ligne = next((l for l in connues if str(l.get("Ref") or "").strip() == ref), None)
+    if not ligne:
+        return jsonify({"ok": False, "message": "Commande introuvable. Actualisez le tableau de bord."}), 200
+    statut = _statuts.get(ref) or str(ligne.get("Statut") or "").strip()
+    if statut in ("Annulée", "Refusée"):
+        return jsonify({"ok": False, "message": "Cette commande est " + statut.lower() + " : pas de paiement à enregistrer."}), 200
+    total = _nombre(ligne.get("Total MRU"))
+    if paye > total:
+        return jsonify({"ok": False, "message": f"Le montant payé ({paye}) dépasse le total de la commande ({int(total)} MRU)."}), 200
+    if paye > 0 and mode in ("", "Crédit"):
+        return jsonify({"ok": False, "message": "Choisissez le mode utilisé pour ce paiement (espèces, Bankily, Masrvi, Sadad...)."}), 200
+    if paye == 0 and mode == "":
+        mode = ""
+    paiement = _etat_paiement(total, paye)
+    champs = {"Paiement": paiement, "Mode": mode, "Montant paye": paye}
+
+    with _verrou_paiements:
+        local = _maj_champs_local(COMMANDES_FILE, ref, champs)   # ligne pas encore dans Google : elle y partira avec son paiement
+        note = ""
+        if COMMANDES_WEBHOOK_URL:
+            if not _script_gere_paiements(COMMANDES_WEBHOOK_URL):
+                if not local:
+                    return jsonify({"ok": False, "message": "Paiement NON enregistré. Recollez le script Google « Commandes » (version avec paiements), "
+                                    "ajoutez les colonnes Paiement, Mode, Montant paye en ligne 1, puis réessayez."}), 200
+                note = " (en attente d'envoi : recollez le script Google « Commandes » pour qu'il parte)"
+            else:
+                try:
+                    r = requests.post(COMMANDES_WEBHOOK_URL, json=_avec_cle({"_action": "paiement", "ref": ref, "paiement": paiement,
+                                      "mode": mode, "montant": paye}), timeout=30)
+                    ok, resume = _analyser_reponse_webhook(r)
+                except Exception as e:
+                    ok, resume = False, str(e)
+                noter_ecriture("Commandes", "OK" if ok else "ÉCHEC", f"paiement {ref} → {paiement} {paye}" + ("" if ok else " — " + resume))
+                if not ok and local:
+                    note = " (enregistré en attente d'envoi avec la commande)"
+                elif not ok:
+                    return jsonify({"ok": False, "message": "Paiement NON enregistré dans Google (" + resume + "). Réessayez dans un instant ; "
+                                    "s'il persiste, vérifiez les colonnes Paiement, Mode et Montant paye."}), 200
+            for miroir in MIROIRS.get(COMMANDES_WEBHOOK_URL, []):   # copie de secours : au mieux, sans bloquer
+                _pool_miroirs.submit(lambda u=miroir: requests.post(u, json=_avec_cle({"_action": "paiement", "ref": ref, "paiement": paiement,
+                                     "mode": mode, "montant": paye}), timeout=30))
+        _paiements[ref] = (time.time(), {"Paiement": paiement, "Mode": mode, "Montant paye": paye})
+        for k in list(_paiements)[:-300]:
+            _paiements.pop(k, None)
+    texte = paiement + (f" : {paye} sur {int(total)} MRU" if paiement != "Non payé" else "") + (f" ({mode})" if mode and paye else "")
+    return jsonify({"ok": True, "message": "Paiement enregistré — " + texte + "." + note}), 200
 
 
 def _envoyer_statut(webhook, fichier, ref, statut, nom):
@@ -2360,9 +2522,11 @@ def api_dashboard():
             "cmd_demandes": sum(1 for c in commandes if c.get("Statut") == "Demande"),
         },
         "a_preparer": dict(sorted(_a_preparer(commandes).items())[:7]),
+        "a_encaisser": _a_encaisser(commandes),
+        "encaisse_par_mode": _encaisse_par_mode(commandes),
         "serie_7j": [{"jour": j, **par_jour[j]} for j in jours],
         "alertes_par_categorie": categories,
-        "dernieres_commandes": [court(c, ["Date", "Client", "Telephone", "WhatsApp", "Quartier", "Message", "Total MRU", "Livraison", "Ref", "Statut"]) for c in _liste_commandes_admin(commandes)],
+        "dernieres_commandes": [court(c, ["Date", "Client", "Telephone", "WhatsApp", "Quartier", "Message", "Total MRU", "Livraison", "Ref", "Statut", "Paiement", "Mode", "Montant paye"]) for c in _liste_commandes_admin(commandes)],
         "dernieres_alertes": [court(a, ["Date", "Client", "Telephone", "WhatsApp", "Quartier", "Categorie", "Message", "Ref", "Statut"]) for a in alertes[:6]],
         "stock": stock,
         "stock_resume": stock_resume,
